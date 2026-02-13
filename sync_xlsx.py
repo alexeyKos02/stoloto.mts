@@ -146,12 +146,17 @@ def safe_int(v: object) -> Optional[int]:
 
 def build_terminal_ranges(terminals: List[int]) -> str:
     """
-    [1001,1002,1003,1007,1008,1015] -> "1001-1003, 1007-1008, 1015"
+    [1001,1002,1003,1007,1008,1015]
+    ->
+    "(1001-1003), (1007-1008), (1015)"
     """
+
     if not terminals:
         return ""
+
     t = sorted(set(terminals))
     res: List[str] = []
+
     start = t[0]
     prev = t[0]
 
@@ -159,11 +164,21 @@ def build_terminal_ranges(terminals: List[int]) -> str:
         if x == prev + 1:
             prev = x
             continue
-        res.append(str(start) if start == prev else f"{start}-{prev}")
+
+        if start == prev:
+            res.append(f"({start})")
+        else:
+            res.append(f"({start}-{prev})")
+
         start = x
         prev = x
 
-    res.append(str(start) if start == prev else f"{start}-{prev}")
+    # последний диапазон
+    if start == prev:
+        res.append(f"({start})")
+    else:
+        res.append(f"({start}-{prev})")
+
     return ", ".join(res)
 
 
