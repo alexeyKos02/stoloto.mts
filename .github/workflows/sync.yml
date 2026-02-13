@@ -16,6 +16,14 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Check Yandex Disk API доступ
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+        run: |
+          curl -s -D- -o /dev/null \
+            -H "Authorization: OAuth ${YANDEX_OAUTH_TOKEN}" \
+            "https://cloud-api.yandex.net/v1/disk/"
+
       - name: Run sync
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}

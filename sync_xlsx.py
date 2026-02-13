@@ -44,11 +44,21 @@ def normalize_mts_id(value) -> str:
 
 def disk_download(path: str) -> bytes:
     r = requests.get(f"{DISK_API}/download", headers=HEADERS, params={"path": path})
+    if r.status_code != 200:
+        print("DOWNLOAD ERROR:", r.status_code)
+        print("PATH:", path)
+        print("BODY:", r.text)
     r.raise_for_status()
+
     href = r.json()["href"]
     f = requests.get(href)
+    if f.status_code != 200:
+        print("FILE GET ERROR:", f.status_code)
+        print("HREF:", href)
+        print("BODY:", f.text[:500])
     f.raise_for_status()
     return f.content
+
 
 
 def disk_upload(path: str, content: bytes) -> None:
