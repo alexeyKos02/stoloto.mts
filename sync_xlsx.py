@@ -4,10 +4,14 @@
 # 1) Скачивает xlsx с Яндекс.Диска по DISK_SOURCE_PATH
 # 2) ВНУТРИ ЭТОГО ФАЙЛА синхронизирует лист "СВОДНАЯ" из "БД"
 #    (ключ: "Агент ID (Столото)"):
-#       - обновляет строки, если данные изменились
-#       - добавляет новых агентов в первую пустую строку (или в конец)
-#       - очищает строки, где агент отсутствует в БД / пустой Agent ID
+#       - обновляет строки, если данные изменились (стили не трогаем)
+#       - добавляет новых агентов: КОПИРУЕТ СТИЛЬ С ШАБЛОННОЙ СТРОКИ, затем пишет значения
+#       - очищает строки, где агент отсутствует в БД / пустой Agent ID (чистим ТОЛЬКО значения)
 # 3) Загружает результат ОБРАТНО В ТОТ ЖЕ DISK_SOURCE_PATH (overwrite)
+#
+# Env (GitHub Secrets):
+#   YANDEX_OAUTH_TOKEN
+#   DISK_SOURCE_PATH
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+from copy import copy
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -38,7 +43,8 @@ class SheetConfig:
         "Ответственный ССПС",
     )
     agent_id_column: str = "Агент ID (Столото)"
-    data_start_row: int = 2  # данные с 2 строки
+    data_start_row: int = 2  # данные с 2 строки (1-я — заголовки)
+    style_template_row: int = 2  # ОТКУДА копировать стиль при вставке новых строк
 
 
 CFG = SheetConfig()
@@ -138,7 +144,8 @@ def _set_row_values(ws: Worksheet, row: int, col_idxs: List[int], values: List[o
         ws.cell(row=row, column=c).value = v
 
 
-def _clear_row(ws: Worksheet, row: int, col_idxs: List[int]) -> None:
+def _clear_row_values_only(ws: Worksheet, row: int, col_idxs: List[int]) -> None:
+    # Чистим только значения, стиль сохраняется
     for c in col_idxs:
         ws.cell(row=row, column=c).value = None
 
@@ -150,6 +157,31 @@ def find_first_empty_row(ws: Worksheet, start_row: int, col_idxs: List[int]) -> 
         if _row_is_empty(vals):
             return r
     return last + 1
+
+
+def copy_row_style(ws: Worksheet, from_row: int, to_row: int, col_idxs: List[int]) -> None:
+    """
+    Копирует визуальное форматирование ячеек из одной строки в другую по заданным колонкам.
+    ВАЖНО: значения НЕ копируем, только стили/форматы.
+    """
+    for c in col_idxs:
+        src_cell = ws.cell(row=from_row, column=c)
+        dst_cell = ws.cell(row=to_row, column=c)
+
+        # базовый стиль
+        if src_cell.has_style:
+            dst_cell._style = copy(src_cell._style)
+
+        # детальные поля (на случай, если _style не всё покрывает)
+        dst_cell.number_format = src_cell.number_format
+        dst_cell.font = copy(src_cell.font)
+        dst_cell.fill = copy(src_cell.fill)
+        dst_cell.border = copy(src_cell.border)
+        dst_cell.alignment = copy(src_cell.alignment)
+        dst_cell.protection = copy(src_cell.protection)
+
+        # комментарий обычно не нужен, но оставим как есть (копировать не будем)
+        # dst_cell.comment = src_cell.comment
 
 
 # ----------------------- Core sync (БД -> СВОДНАЯ) -----------------------
@@ -181,7 +213,7 @@ def sync_inside_workbook(xlsx_bytes: bytes, cfg: SheetConfig = CFG) -> bytes:
     src_agent_col = src_headers[cfg.agent_id_column]
     tgt_agent_col = tgt_headers[cfg.agent_id_column]
 
-    # 1) Уникальные агенты из БД (по Agent ID), берём первую встреченную запись
+    # 1) Уникальные агенты из БД (по Agent ID) — берём первую встреченную строку
     source_map: Dict[str, List[object]] = {}
     for r in range(cfg.data_start_row, ws_src.max_row + 1):
         agent_id_val = ws_src.cell(row=r, column=src_agent_col).value
@@ -207,6 +239,7 @@ def sync_inside_workbook(xlsx_bytes: bytes, cfg: SheetConfig = CFG) -> bytes:
         row_vals = _get_row_values(ws_tgt, r, tgt_col_idxs)
 
         if not agent_id:
+            # пустая строка — если там мусор по нашим колонкам, чистим только значения
             if not _row_is_empty(row_vals):
                 clears.append(r)
             continue
@@ -218,21 +251,32 @@ def sync_inside_workbook(xlsx_bytes: bytes, cfg: SheetConfig = CFG) -> bytes:
                 updates.append((r, src_vals))
             seen_agent_ids.add(agent_id)
         else:
+            # агента нет в БД — чистим значения в наших колонках
             clears.append(r)
 
     # 3) Новые агенты (которых нет в СВОДНОЙ)
     new_agent_ids = [aid for aid in source_map.keys() if aid not in seen_agent_ids]
 
-    # 4) Применяем
+    # 4) Применяем изменения
     for r in clears:
-        _clear_row(ws_tgt, r, tgt_col_idxs)
+        _clear_row_values_only(ws_tgt, r, tgt_col_idxs)
 
     for r, vals in updates:
         _set_row_values(ws_tgt, r, tgt_col_idxs, vals)
 
+    # 5) Вставки: копируем стиль с template_row, затем пишем значения
     insert_row = find_first_empty_row(ws_tgt, cfg.data_start_row, tgt_col_idxs)
     inserted = 0
+
+    template_row = cfg.style_template_row
+    if template_row < cfg.data_start_row:
+        template_row = cfg.data_start_row
+
     for aid in new_agent_ids:
+        # копируем стили, только если template_row реально существует
+        if ws_tgt.max_row >= template_row:
+            copy_row_style(ws_tgt, template_row, insert_row, tgt_col_idxs)
+
         _set_row_values(ws_tgt, insert_row, tgt_col_idxs, source_map[aid])
         insert_row += 1
         inserted += 1
