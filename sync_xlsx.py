@@ -180,6 +180,46 @@ def build_terminal_ranges(terminals: List[int]) -> str:
         res.append(f"({start}-{prev})")
 
     return ", ".join(res)
+def ensure_svod_columns(ws):
+    COLUMNS_TO_ADD = [
+        "Добавлен сертификат",
+        "Добавлен сертификат (МТС)",
+        "Билеты продаются",
+    ]
+
+    # читаем заголовки первой строки
+    headers = []
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        headers.append("" if v is None else str(v).strip())
+
+    existing = set(headers)
+    to_add = [h for h in COLUMNS_TO_ADD if h not in existing]
+
+    if not to_add:
+        print("SVOD: столбцы уже существуют")
+        return
+
+    start_col = len(headers) + 1
+
+    # добавляем заголовки
+    for i, name in enumerate(to_add):
+        ws.cell(row=1, column=start_col + i).value = name
+
+    # заполняем существующие строки False
+    last_row = ws.max_row
+    for r in range(2, last_row + 1):
+        # если строка не пустая
+        row_vals = [ws.cell(row=r, column=c).value for c in range(1, start_col)]
+        if not any(v is not None and str(v).strip() != "" for v in row_vals):
+            continue
+
+        for i in range(len(to_add)):
+            cell = ws.cell(row=r, column=start_col + i)
+            if cell.value is None:
+                cell.value = False
+
+    print(f"SVOD: добавлены столбцы {to_add}")
 
 
 # ---------------- Core sync (diff) ----------------
@@ -307,13 +347,29 @@ def main() -> None:
     print(f"Download: {DISK_SOURCE_PATH}")
     src = disk_download(DISK_SOURCE_PATH)
 
+    # 1) Добавляем 3 столбца в "СВОДНАЯ" (если нужно)
+    print('Ensure columns in "СВОДНАЯ"...')
+    wb = load_workbook(io.BytesIO(src))
+
+    if "СВОДНАЯ" in wb.sheetnames:
+        ensure_svod_columns(wb["СВОДНАЯ"])
+    else:
+        print('Sheet "СВОДНАЯ" not found -> skip')
+
+    tmp = io.BytesIO()
+    wb.save(tmp)
+    src = tmp.getvalue()  # <- важно: обновляем src, чтобы дальше синк работал уже на новой версии
+
+    # 2) Твоя основная логика
     print("Sync (diff + terminal ranges)...")
     out = sync_inside_workbook(src)
 
+    # 3) Загружаем обратно в тот же путь (source)
     print(f"Upload back to same path: {DISK_SOURCE_PATH}")
     disk_upload(DISK_SOURCE_PATH, out)
 
     print("✅ Done")
+
 
 
 if __name__ == "__main__":
