@@ -2,13 +2,12 @@ name: Sync Yandex XLSX
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/5 * * * *"   # минимум 5 минут
+  workflow_dispatch:         # ручной запуск кнопкой
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
