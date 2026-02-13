@@ -1,216 +1,298 @@
+# sync_xlsx.py
+# Sync "БД" -> "СВОДНАЯ" внутри ОДНОГО xlsx-файла:
+# - берём уникальных агентов по "Агент ID (Столото)" из листа "БД"
+# - обновляем/добавляем строки на листе "СВОДНАЯ"
+# - строки в СВОДНОЙ, которых больше нет в БД, очищаем (только по синхронизируемым колонкам)
+#
+# Переменные окружения (GitHub Secrets):
+#   YANDEX_OAUTH_TOKEN
+#   DISK_SOURCE_PATH   (путь к xlsx на Я.Диске, например "/МТС_ВНЕШНЯЯ.xlsx")
+#   DISK_TARGET_PATH   (куда сохранять результат, можно тот же путь)
+
+from __future__ import annotations
+
 import os
-import io
-import sys
+import json
+from io import BytesIO
+from typing import Dict, List, Tuple, Optional
+
 import requests
-from typing import List, Dict, Any, Tuple
 from openpyxl import load_workbook
 
-YANDEX_TOKEN = os.environ.get("YANDEX_OAUTH_TOKEN", "").strip()
-DISK_FILE_PATH = os.environ.get("DISK_FILE_PATH", "").strip()
 
 CONFIG = {
     "sourceSheet": "БД",
     "targetSheet": "СВОДНАЯ",
     "columns": ["ЮЛ", "МТС ID", "Terminal ID (Столото)", "Агент ID (Столото)", "GUID", "Ответственный ССПС"],
-    "keyColumn": "Агент ID (Столото)",
-    "dataStartRow": 2,  # данные начинаются со 2-й строки (1-я — заголовки)
-    "clearMissingInTarget": True,  # как в твоём GAS: если агента нет в БД — чистим строку в СВОДНОЙ
+    "agentIdColumn": "Агент ID (Столото)",
+    "dataStartRow": 2,  # первая строка данных (после заголовков)
 }
 
-API_BASE = "https://cloud-api.yandex.net/v1/disk"
+
+YANDEX_API = "https://cloud-api.yandex.net/v1/disk"
 
 
-def _headers() -> Dict[str, str]:
-    if not YANDEX_TOKEN:
-        raise RuntimeError("YANDEX_OAUTH_TOKEN is empty")
-    return {"Authorization": f"OAuth {YANDEX_TOKEN}"}
+def _env(name: str) -> str:
+    v = os.environ.get(name, "")
+    return v.strip() if isinstance(v, str) else ""
 
 
-def disk_download(path: str) -> bytes:
-    r = requests.get(f"{API_BASE}/resources/download", headers=_headers(), params={"path": path}, timeout=60)
+def _headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"OAuth {token}"}
+
+
+def disk_download(token: str, path: str) -> bytes:
+    # 1) запрашиваем ссылку на скачивание
+    r = requests.get(
+        f"{YANDEX_API}/resources/download",
+        headers=_headers(token),
+        params={"path": path},
+        timeout=60,
+    )
     if r.status_code != 200:
-        raise RuntimeError(f"Download link error {r.status_code}: {r.text}")
+        raise RuntimeError(f"DOWNLOAD LINK ERROR: {r.status_code} {r.text}")
+
     href = r.json().get("href")
     if not href:
-        raise RuntimeError(f"No download href for path={path}")
+        raise RuntimeError(f"DOWNLOAD LINK ERROR: no href in response: {r.text}")
+
+    # 2) скачиваем файл
     f = requests.get(href, timeout=120)
     if f.status_code != 200:
-        raise RuntimeError(f"File download error {f.status_code}: {f.text}")
+        raise RuntimeError(f"DOWNLOAD ERROR: {f.status_code} {f.text}")
+
     return f.content
 
 
-def disk_upload(path: str, content: bytes) -> None:
+def disk_upload(token: str, path: str, content: bytes) -> None:
+    # 1) получаем ссылку для загрузки
     r = requests.get(
-        f"{API_BASE}/resources/upload",
-        headers=_headers(),
+        f"{YANDEX_API}/resources/upload",
+        headers=_headers(token),
         params={"path": path, "overwrite": "true"},
         timeout=60,
     )
     if r.status_code != 200:
-        raise RuntimeError(f"Upload link error {r.status_code}: {r.text}")
+        raise RuntimeError(f"UPLOAD LINK ERROR: {r.status_code} {r.text}")
+
     href = r.json().get("href")
     if not href:
-        raise RuntimeError(f"No upload href for path={path}")
-    put = requests.put(href, data=content, timeout=180)
-    if put.status_code not in (201, 202):
-        raise RuntimeError(f"Upload PUT error {put.status_code}: {put.text}")
+        raise RuntimeError(f"UPLOAD LINK ERROR: no href in response: {r.text}")
+
+    # 2) грузим бинарник
+    up = requests.put(href, data=content, timeout=180)
+    if up.status_code not in (201, 202):
+        raise RuntimeError(f"UPLOAD ERROR: {up.status_code} {up.text}")
 
 
-def get_header_map(ws, header_row: int = 1) -> Dict[str, int]:
-    # возвращает: "Название колонки" -> индекс (1-based)
-    m: Dict[str, int] = {}
+def read_headers(ws) -> Dict[str, int]:
+    """Возвращает мапу: header -> column_index(1-based)"""
+    res: Dict[str, int] = {}
     for col in range(1, ws.max_column + 1):
-        v = ws.cell(row=header_row, column=col).value
-        if isinstance(v, str) and v.strip():
-            m[v.strip()] = col
-    return m
+        val = ws.cell(row=1, column=col).value
+        if isinstance(val, str) and val.strip():
+            res[val.strip()] = col
+    return res
 
 
-def row_values(ws, row: int, col_indexes: List[int]) -> List[Any]:
-    return [ws.cell(row=row, column=c).value for c in col_indexes]
+def get_row_values(ws, row: int, cols_1based: List[int]) -> List[str]:
+    out: List[str] = []
+    for c in cols_1based:
+        v = ws.cell(row=row, column=c).value
+        out.append("" if v is None else str(v))
+    return out
 
 
-def set_row_values(ws, row: int, col_indexes: List[int], values: List[Any]) -> None:
-    for c, v in zip(col_indexes, values):
+def set_row_values(ws, row: int, cols_1based: List[int], values: List[str]) -> None:
+    for c, v in zip(cols_1based, values):
         ws.cell(row=row, column=c).value = v
 
 
-def is_row_empty(values: List[Any]) -> bool:
-    for v in values:
+def clear_row(ws, row: int, cols_1based: List[int]) -> None:
+    for c in cols_1based:
+        ws.cell(row=row, column=c).value = None
+
+
+def is_row_empty(ws, row: int, cols_1based: List[int]) -> bool:
+    for c in cols_1based:
+        v = ws.cell(row=row, column=c).value
         if v not in (None, ""):
             return False
     return True
 
 
-def values_equal(a: List[Any], b: List[Any]) -> bool:
+def arrays_equal(a: List[str], b: List[str]) -> bool:
     if len(a) != len(b):
         return False
     for x, y in zip(a, b):
-        if ("" if x is None else str(x)) != ("" if y is None else str(y)):
+        if str(x) != str(y):
             return False
     return True
 
 
-def find_first_empty_row(ws, start_row: int, check_cols: List[int]) -> int:
-    r = start_row
-    while r <= ws.max_row:
-        vals = row_values(ws, r, check_cols)
-        if is_row_empty(vals):
+def find_last_data_row(ws, start_row: int, cols_1based: List[int]) -> int:
+    """
+    Ищем последнюю строку, где в синхронизируемых колонках есть хоть что-то.
+    """
+    last = start_row - 1
+    max_r = ws.max_row
+    for r in range(start_row, max_r + 1):
+        if not is_row_empty(ws, r, cols_1based):
+            last = r
+    return max(last, start_row - 1)
+
+
+def find_first_empty_row(ws, start_row: int, cols_1based: List[int]) -> int:
+    last = find_last_data_row(ws, start_row, cols_1based)
+    if last < start_row:
+        return start_row
+    for r in range(start_row, last + 1):
+        if is_row_empty(ws, r, cols_1based):
             return r
-        r += 1
-    return ws.max_row + 1
+    return last + 1
 
 
-def main() -> None:
-    if not DISK_FILE_PATH:
-        raise RuntimeError("DISK_FILE_PATH is empty (set it in GitHub Secrets)")
+def build_source_map(ws_source, source_cols: List[int], agent_col: int, start_row: int) -> Dict[str, List[str]]:
+    """
+    Возвращает dict agentId -> rowData (строка по sync columns).
+    Берём только первую встреченную запись агента (уникализация).
+    """
+    source_map: Dict[str, List[str]] = {}
+    max_r = ws_source.max_row
+    for r in range(start_row, max_r + 1):
+        agent_id_val = ws_source.cell(row=r, column=agent_col).value
+        if agent_id_val in (None, ""):
+            continue
+        agent_id = str(agent_id_val)
+        if agent_id in source_map:
+            continue
+        row_data = get_row_values(ws_source, r, source_cols)
+        source_map[agent_id] = row_data
+    return source_map
 
-    print("1) Downloading XLSX from Yandex Disk…")
-    xlsx_bytes = disk_download(DISK_FILE_PATH)
 
-    print("2) Loading workbook…")
-    wb = load_workbook(io.BytesIO(xlsx_bytes))
+def sync_in_workbook(xlsx_bytes: bytes) -> bytes:
+    wb = load_workbook(filename=BytesIO(xlsx_bytes))
+    if CONFIG["sourceSheet"] not in wb.sheetnames:
+        raise RuntimeError(f'Source: sheet "{CONFIG["sourceSheet"]}" not found')
+    if CONFIG["targetSheet"] not in wb.sheetnames:
+        raise RuntimeError(f'Target: sheet "{CONFIG["targetSheet"]}" not found')
 
-    src_name = CONFIG["sourceSheet"]
-    tgt_name = CONFIG["targetSheet"]
+    ws_source = wb[CONFIG["sourceSheet"]]
+    ws_target = wb[CONFIG["targetSheet"]]
 
-    if src_name not in wb.sheetnames:
-        raise RuntimeError(f'Source sheet "{src_name}" not found')
-    if tgt_name not in wb.sheetnames:
-        raise RuntimeError(f'Target sheet "{tgt_name}" not found')
+    src_headers = read_headers(ws_source)
+    tgt_headers = read_headers(ws_target)
 
-    src = wb[src_name]
-    tgt = wb[tgt_name]
+    # Проверяем наличие всех колонок
+    missing_src = [c for c in CONFIG["columns"] if c not in src_headers]
+    missing_tgt = [c for c in CONFIG["columns"] if c not in tgt_headers]
 
-    src_headers = get_header_map(src, 1)
-    tgt_headers = get_header_map(tgt, 1)
+    if missing_src:
+        raise RuntimeError(f"Missing columns in source sheet '{CONFIG['sourceSheet']}': {missing_src}")
+    if missing_tgt:
+        raise RuntimeError(f"Missing columns in target sheet '{CONFIG['targetSheet']}': {missing_tgt}")
 
-    required_cols = CONFIG["columns"]
-    key_col = CONFIG["keyColumn"]
+    # Индексы колонок (1-based)
+    src_cols = [src_headers[c] for c in CONFIG["columns"]]
+    tgt_cols = [tgt_headers[c] for c in CONFIG["columns"]]
 
-    for col in required_cols:
-        if col not in src_headers:
-            raise RuntimeError(f'Source: column "{col}" not found')
-        if col not in tgt_headers:
-            raise RuntimeError(f'Target: column "{col}" not found')
-
-    src_idx = [src_headers[c] for c in required_cols]
-    tgt_idx = [tgt_headers[c] for c in required_cols]
-    tgt_key_idx = tgt_headers[key_col]
-    src_key_idx = src_headers[key_col]
+    agent_src_col = src_headers[CONFIG["agentIdColumn"]]
+    agent_tgt_col = tgt_headers[CONFIG["agentIdColumn"]]
 
     start_row = int(CONFIG["dataStartRow"])
 
-    # 3) Собираем уникальные записи из БД по key
-    src_map: Dict[str, List[Any]] = {}
-    for r in range(start_row, src.max_row + 1):
-        key = src.cell(row=r, column=src_key_idx).value
-        if key in (None, ""):
+    # 1) строим source map (уникальные агенты)
+    source_map = build_source_map(ws_source, src_cols, agent_src_col, start_row)
+    print(f"Found unique agents in '{CONFIG['sourceSheet']}': {len(source_map)}")
+
+    # 2) проходим по target и считаем обновления/очистки
+    updates: List[Tuple[int, List[str]]] = []
+    rows_to_clear: List[int] = []
+
+    last_target_row = find_last_data_row(ws_target, start_row, tgt_cols)
+    if last_target_row < start_row:
+        last_target_row = start_row - 1  # нет данных
+
+    # копия, чтобы после прохода остались только новые
+    remaining = dict(source_map)
+
+    for r in range(start_row, last_target_row + 1):
+        agent_val = ws_target.cell(row=r, column=agent_tgt_col).value
+        if agent_val in (None, ""):
+            # пустая строка — очищаем синхронизируемые колонки (если вдруг там мусор)
+            if not is_row_empty(ws_target, r, tgt_cols):
+                rows_to_clear.append(r)
             continue
-        k = str(key)
-        if k not in src_map:
-            src_map[k] = row_values(src, r, src_idx)
 
-    print(f"3) Source unique keys: {len(src_map)}")
+        agent_id = str(agent_val)
+        src_row = remaining.get(agent_id)
 
-    # 4) Идём по СВОДНОЙ: обновляем/помечаем на очистку
-    updates: List[Tuple[int, List[Any]]] = []
-    to_clear: List[int] = []
-
-    for r in range(start_row, tgt.max_row + 1):
-        key = tgt.cell(row=r, column=tgt_key_idx).value
-        if key in (None, ""):
-            # пустые строки как в твоей логике — чистим
-            to_clear.append(r)
+        if src_row is None:
+            # агента больше нет в БД
+            rows_to_clear.append(r)
             continue
 
-        k = str(key)
-        if k in src_map:
-            src_row = src_map[k]
-            tgt_row = row_values(tgt, r, tgt_idx)
-            if not values_equal(src_row, tgt_row):
-                updates.append((r, src_row))
-            # убираем обработанное
-            del src_map[k]
-        else:
-            if CONFIG["clearMissingInTarget"]:
-                to_clear.append(r)
+        tgt_row = get_row_values(ws_target, r, tgt_cols)
+        if not arrays_equal(src_row, tgt_row):
+            updates.append((r, src_row))
 
-    # 5) Добавляем оставшиеся новые записи в первую пустую строку
-    first_empty = find_first_empty_row(tgt, start_row, tgt_idx)
-    inserts: List[Tuple[int, List[Any]]] = []
-    for k, row in src_map.items():
-        inserts.append((first_empty, row))
-        first_empty += 1
+        # обработали — убираем из remaining
+        remaining.pop(agent_id, None)
 
-    # 6) Применяем изменения
-    if to_clear:
-        for r in to_clear:
-            set_row_values(tgt, r, tgt_idx, [""] * len(tgt_idx))
-        print(f"Cleared rows: {len(to_clear)}")
+    # 3) новые записи (то, что осталось в remaining) — вставляем в первую пустую строку
+    inserts: List[Tuple[int, List[str]]] = []
+    insert_row = find_first_empty_row(ws_target, start_row, tgt_cols)
+
+    for agent_id, row_data in remaining.items():
+        inserts.append((insert_row, row_data))
+        insert_row += 1
+
+    # 4) применяем изменения
+    if rows_to_clear:
+        for r in rows_to_clear:
+            clear_row(ws_target, r, tgt_cols)
+        print(f"Cleared rows: {len(rows_to_clear)}")
 
     if updates:
-        for r, row in updates:
-            set_row_values(tgt, r, tgt_idx, row)
+        for r, row_data in updates:
+            set_row_values(ws_target, r, tgt_cols, row_data)
         print(f"Updated rows: {len(updates)}")
 
     if inserts:
-        for r, row in inserts:
-            set_row_values(tgt, r, tgt_idx, row)
+        for r, row_data in inserts:
+            set_row_values(ws_target, r, tgt_cols, row_data)
         print(f"Inserted rows: {len(inserts)}")
 
-    # 7) Сохраняем и заливаем обратно
-    print("7) Uploading updated XLSX back to Yandex Disk…")
-    out = io.BytesIO()
+    out = BytesIO()
     wb.save(out)
-    disk_upload(DISK_FILE_PATH, out.getvalue())
+    return out.getvalue()
 
-    print("✅ Done.")
+
+def main() -> None:
+    token = _env("YANDEX_OAUTH_TOKEN")
+    source_path = _env("DISK_SOURCE_PATH")
+    target_path = _env("DISK_TARGET_PATH")
+
+    if not token:
+        raise RuntimeError("YANDEX_OAUTH_TOKEN is empty (set it in GitHub Secrets)")
+    if not source_path:
+        raise RuntimeError("DISK_SOURCE_PATH is empty (set it in GitHub Secrets)")
+    if not target_path:
+        raise RuntimeError("DISK_TARGET_PATH is empty (set it in GitHub Secrets)")
+
+    print("1) Downloading source from Yandex Disk...")
+    src_bytes = disk_download(token, source_path)
+    print(f"   downloaded: {len(src_bytes)} bytes")
+
+    print("2) Sync inside workbook (БД -> СВОДНАЯ)...")
+    out_bytes = sync_in_workbook(src_bytes)
+    print(f"   synced: {len(out_bytes)} bytes")
+
+    print("3) Uploading result to Yandex Disk...")
+    disk_upload(token, target_path, out_bytes)
+    print("✅ Done")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        sys.exit(1)
+    main()
