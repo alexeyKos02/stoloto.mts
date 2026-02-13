@@ -1,8 +1,6 @@
 name: Sync Yandex XLSX
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # минимум 5 минут
   workflow_dispatch:         # ручной запуск кнопкой
 
 jobs:
