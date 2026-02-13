@@ -187,7 +187,7 @@ def ensure_svod_columns(ws):
         "Билеты продаются",
     ]
 
-    # читаем заголовки первой строки
+    # читаем заголовки
     headers = []
     for c in range(1, ws.max_column + 1):
         v = ws.cell(row=1, column=c).value
@@ -206,10 +206,9 @@ def ensure_svod_columns(ws):
     for i, name in enumerate(to_add):
         ws.cell(row=1, column=start_col + i).value = name
 
-    # заполняем существующие строки False
+    # заполняем существующие строки 0
     last_row = ws.max_row
     for r in range(2, last_row + 1):
-        # если строка не пустая
         row_vals = [ws.cell(row=r, column=c).value for c in range(1, start_col)]
         if not any(v is not None and str(v).strip() != "" for v in row_vals):
             continue
@@ -217,10 +216,9 @@ def ensure_svod_columns(ws):
         for i in range(len(to_add)):
             cell = ws.cell(row=r, column=start_col + i)
             if cell.value is None:
-                cell.value = False
+                cell.value = 0
 
     print(f"SVOD: добавлены столбцы {to_add}")
-
 
 # ---------------- Core sync (diff) ----------------
 
