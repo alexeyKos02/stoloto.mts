@@ -535,20 +535,26 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     )
 
     cols = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
+
     ENG_COL = "ENG"
+
     if KEY_COLUMN_EXPORT not in cols:
         cols = [KEY_COLUMN_EXPORT] + cols
 
     src_map = header_index_map(ws_src)
     tgt_map = header_index_map(ws_tgt)
 
+    # ensure headers in target (колонки для синка)
     for name in cols:
         if name not in tgt_map:
             ws_tgt.cell(row=1, column=ws_tgt.max_column + 1).value = name
-# ensure ENG exists ONLY in TARGET
-    tgt_map = header_index_map(ws_tgt)            # обновили карту после добавления cols
+
+    # ensure ENG exists ONLY in TARGET
+    tgt_map = header_index_map(ws_tgt)
     if ENG_COL not in tgt_map:
         ws_tgt.cell(row=1, column=ws_tgt.max_column + 1).value = ENG_COL
+
+    # refresh after header changes
     tgt_map = header_index_map(ws_tgt)
 
     if KEY_COLUMN_EXPORT not in src_map:
