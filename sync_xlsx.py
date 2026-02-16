@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import time
+from copy import copy
 from typing import Dict, List, Tuple, Optional
 
 import requests
@@ -50,7 +51,7 @@ SVOD_REQUIRED_BASE = [
     "Ответственный ССПС",
 ]
 
-# Колонки, которые берем из БД для сборки витрины по агенту
+# Колонки, которые берем из БД
 BD_REQUIRED = [
     "ЮЛ",
     "МТС ID",
@@ -60,12 +61,14 @@ BD_REQUIRED = [
     "Ответственный ССПС",
 ]
 
+# Сколько строк покрывать условным форматированием "с запасом"
+CF_END_ROW_MIN = 5000
+
 
 # =======================
 # YANDEX DISK API
 # =======================
 def disk_download(path: str) -> bytes:
-    # 1) получить href на скачивание
     r = requests.get(
         f"{YANDEX_API}/resources/download",
         headers=HEADERS,
@@ -76,7 +79,6 @@ def disk_download(path: str) -> bytes:
         raise RuntimeError(f"DOWNLOAD ERROR: {r.status_code}\nPATH: {path}\nBODY: {r.text}")
     href = r.json()["href"]
 
-    # 2) скачать
     f = requests.get(href, timeout=120)
     if f.status_code >= 400:
         raise RuntimeError(f"DOWNLOAD(HREF) ERROR: {f.status_code}\nHREF: {href}\nBODY: {f.text}")
@@ -84,10 +86,6 @@ def disk_download(path: str) -> bytes:
 
 
 def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
-    """
-    overwrite=true. Если файл залочен (423) — ретраи.
-    """
-    # 1) получить href на загрузку
     r = requests.get(
         f"{YANDEX_API}/resources/upload",
         headers=HEADERS,
@@ -98,13 +96,11 @@ def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
         raise RuntimeError(f"UPLOAD(HREF) ERROR: {r.status_code}\nPATH: {path}\nBODY: {r.text}")
     href = r.json()["href"]
 
-    # 2) загрузить по href (PUT)
     for attempt in range(1, retries + 1):
         put = requests.put(href, data=content, timeout=180)
         if put.status_code < 400:
             return
 
-        # 423 Locked — файл открыт/занят на Диске/в редакторе
         if put.status_code == 423:
             wait = min(2 ** attempt, 30)
             print(f"⚠️ Upload LOCKED (423). Retry {attempt}/{retries} in {wait}s...")
@@ -123,10 +119,6 @@ def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
 # HELPERS: columns
 # =======================
 def header_index_map(ws: Worksheet) -> Dict[str, int]:
-    """
-    Возвращает мапу: header -> 1-based column index.
-    Берём первую строку как заголовки.
-    """
     m: Dict[str, int] = {}
     max_col = ws.max_column
     for c in range(1, max_col + 1):
@@ -140,9 +132,6 @@ def header_index_map(ws: Worksheet) -> Dict[str, int]:
 
 
 def ensure_columns_at_end(ws: Worksheet, needed: List[str]) -> None:
-    """
-    Добавляет отсутствующие колонки в конец (в первой строке).
-    """
     m = header_index_map(ws)
     last = ws.max_column
     for name in needed:
@@ -162,6 +151,26 @@ def is_empty_cell(v) -> bool:
 
 
 # =======================
+# STYLE COPY (табличное оформление)
+# =======================
+def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int) -> None:
+    """
+    Копирует стили ячеек (заливка/границы/шрифт/выравнивание/форматы) из src_row -> dst_row
+    """
+    for c in range(1, max_col + 1):
+        src = ws.cell(row=src_row, column=c)
+        dst = ws.cell(row=dst_row, column=c)
+        if src.has_style:
+            dst._style = copy(src._style)
+            dst.number_format = src.number_format
+            dst.font = copy(src.font)
+            dst.fill = copy(src.fill)
+            dst.border = copy(src.border)
+            dst.alignment = copy(src.alignment)
+            dst.protection = copy(src.protection)
+
+
+# =======================
 # TERMINAL RANGES
 # =======================
 def parse_terminal_id(x: str) -> Optional[int]:
@@ -175,9 +184,6 @@ def parse_terminal_id(x: str) -> Optional[int]:
 
 
 def compress_ranges(nums: List[int]) -> List[Tuple[int, int]]:
-    """
-    [1,2,3,7,8] -> [(1,3),(7,8)]
-    """
     if not nums:
         return []
     nums = sorted(set(nums))
@@ -194,17 +200,12 @@ def compress_ranges(nums: List[int]) -> List[Tuple[int, int]]:
 
 
 def format_ranges(ranges: List[Tuple[int, int]]) -> str:
-    """
-    Требование: скобки вокруг каждого диапазона.
-    Один ID тоже в скобках.
-    Несколько диапазонов — через пробел.
-    """
     parts = []
     for a, b in ranges:
         if a == b:
             parts.append(f"({a})")
         else:
-            parts.append(f"({a}–{b})")  # en dash
+            parts.append(f"({a}–{b})")
     return " ".join(parts)
 
 
@@ -216,19 +217,16 @@ FILL_RED = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="soli
 FILL_GRAY = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
 
 
-def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
-    """
-    Ставим CF (поддерживаемое openpyxl) на диапазон:
-    - 1 -> зелёный
-    - 0 -> красный
-    - пусто -> серый
-    """
-    rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
+def col_to_letter(n: int) -> str:
+    s = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
-    # Чтобы не копить мусор, удалим существующие правила на этот диапазон.
-    # У openpyxl нет идеального API "удалить именно этот диапазон", но можно просто перезаписать:
-    # добавим правила заново — в большинстве случаев будет ок.
-    # (Если хочешь 100% чисто — можно пересобрать ws.conditional_formatting._cf_rules, но это хрупко.)
+
+def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
+    rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
 
     # Пусто
     ws.conditional_formatting.add(
@@ -247,27 +245,14 @@ def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) 
     )
 
 
-def col_to_letter(n: int) -> str:
-    s = ""
-    while n:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
 # =======================
 # MAIN SYNC LOGIC
 # =======================
 def ensure_svod_columns(ws_svod: Worksheet) -> None:
-    # Обеспечиваем наличие новых 3 столбцов в конце
     ensure_columns_at_end(ws_svod, SVOD_BOOL_COLS)
 
 
 def normalize_bool_to_01(v) -> Optional[int]:
-    """
-    Превращаем True/False/ЛОЖЬ/ИСТИНА/0/1/"0"/"1" в int 0/1.
-    Если пусто — None.
-    """
     if v is None:
         return None
     if isinstance(v, bool):
@@ -302,7 +287,7 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     print(f'Ensure columns in "{SHEET_SVOD}"...')
     ensure_svod_columns(ws_svod)
 
-    # 2) Проверяем, что базовые колонки присутствуют
+    # 2) Проверяем базовые колонки
     bd_map = header_index_map(ws_bd)
     sv_map = header_index_map(ws_svod)
 
@@ -314,17 +299,9 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     if missing_svod:
         raise RuntimeError(f'Missing columns in "{SHEET_SVOD}": {missing_svod}')
 
-    # 3) Считаем данные БД -> агрегируем по агенту терминалы в диапазоны
-    # Ключ — Агент ID (Столото)
+    # 3) БД -> агрегируем по агенту
     agent_col_bd = bd_map["Агент ID (Столото)"]
     terminal_col_bd = bd_map["Terminal ID (Столото)"]
-
-    # Снимем остальные поля по агенту (первое непустое)
-    def pick_first_nonempty(values: List[str]) -> str:
-        for x in values:
-            if x.strip():
-                return x
-        return ""
 
     bd_by_agent: Dict[str, Dict[str, str]] = {}
     terminals_by_agent: Dict[str, List[int]] = {}
@@ -339,71 +316,71 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
         if term_num is not None:
             terminals_by_agent.setdefault(agent, []).append(term_num)
 
-        # собираем поля
         payload = bd_by_agent.setdefault(agent, {k: "" for k in BD_REQUIRED})
         for col_name in BD_REQUIRED:
             val = get_cell_str(ws_bd, r, bd_map[col_name])
             if payload[col_name] == "" and val != "":
                 payload[col_name] = val
 
-    # терминалы -> диапазоны
     for agent, nums in terminals_by_agent.items():
         rngs = compress_ranges(nums)
         bd_by_agent[agent]["Terminal ID (Столото)"] = format_ranges(rngs)
 
-    # 4) Мапа существующих строк в СВОДНАЯ по агенту
+    # 4) существующие строки в СВОДНАЯ по агенту
+    sv_map = header_index_map(ws_svod)  # обновляем карту (колонки могли добавиться)
     agent_col_sv = sv_map["Агент ID (Столото)"]
+
     existing_row_by_agent: Dict[str, int] = {}
     for r in range(2, ws_svod.max_row + 1):
         agent = get_cell_str(ws_svod, r, agent_col_sv)
         if agent:
             existing_row_by_agent[agent] = r
 
-    # 5) Обновляем/добавляем строки (но НЕ трогаем 3 новых столбца, если там уже есть значения)
+    # 5) Обновляем/добавляем
     inserted = 0
     updated = 0
 
     for agent, payload in bd_by_agent.items():
         if agent in existing_row_by_agent:
             rr = existing_row_by_agent[agent]
-            # обновим базовые поля всегда
+            # обновляем базовые поля
             for col_name in SVOD_REQUIRED_BASE:
-                if col_name == "Terminal ID (Столото)":
-                    ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-                else:
-                    # не ломаем, если в сводной уже заполнено, но можно обновлять (обычно хотят актуализацию)
-                    ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
+                ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
             updated += 1
         else:
             rr = ws_svod.max_row + 1
+
+            # ✅ КОПИРУЕМ СТИЛЬ С ШАБЛОННОЙ СТРОКИ (обычно 2-я строка)
+            template_row = 2 if ws_svod.max_row >= 2 else None
+            if template_row:
+                copy_row_style(ws_svod, template_row, rr, ws_svod.max_column)
+
             # базовые поля
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            # новые булевые столбцы ставим пустыми (чтобы человек руками отмечал)
+
+            # ✅ новые булевые столбцы: для НОВЫХ строк ставим 0
+            sv_map2 = header_index_map(ws_svod)
             for col_name in SVOD_BOOL_COLS:
-                # если колонки добавлены в конец, их индексы могли измениться — пересчитаем
-                sv_map2 = header_index_map(ws_svod)
-                ws_svod.cell(row=rr, column=sv_map2[col_name]).value = None
+                ws_svod.cell(row=rr, column=sv_map2[col_name]).value = 0
+
             inserted += 1
 
-    # 6) Приводим значения в 3 булевых столбцах к 0/1, но НЕ перезаписываем непонятные/пустые
-    sv_map = header_index_map(ws_svod)  # обновили карту (на случай добавления колонок)
+    # 6) Нормализуем существующие значения в 3 столбцах к 0/1 (НЕ трогаем пустые и "странные")
+    sv_map = header_index_map(ws_svod)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
         for r in range(2, ws_svod.max_row + 1):
             v = ws_svod.cell(row=r, column=c).value
-            # если пусто — оставляем пусто
             if is_empty_cell(v):
                 continue
             norm = normalize_bool_to_01(v)
             if norm is None:
-                # странное значение — не трогаем
                 continue
             ws_svod.cell(row=r, column=c).value = norm
 
-    # 7) Ставим условное форматирование заново на эти 3 колонки
-    # (по факту это и есть “исправление” — даже если openpyxl что-то удалил, мы вернули)
-    end_row = max(ws_svod.max_row, 2)
+    # 7) CF на диапазон с запасом, чтобы будущие новые строки сразу были окрашены
+    end_row = max(ws_svod.max_row, 2, CF_END_ROW_MIN)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
         letter = col_to_letter(c)
@@ -424,7 +401,7 @@ def main() -> None:
     src = disk_download(DISK_SOURCE_PATH)
     print(f"downloaded: {len(src)} bytes")
 
-    print("Sync (diff + terminal ranges + ensure 3 cols + CF reapply + 0/1)...")
+    print("Sync (diff + terminal ranges + ensure 3 cols + style copy + CF reapply + 0/1)...")
     out = sync_inside_workbook(src)
 
     print(f"Upload back to same path: {DISK_SOURCE_PATH}")
