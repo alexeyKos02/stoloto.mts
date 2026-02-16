@@ -153,7 +153,7 @@ def col_to_letter(n: int) -> str:
         s = chr(65 + r) + s
     return s
 
-def ru_to_translit_slug(text: str) -> str:
+def ru_to_translit(text: str) -> str:
     m = {
         "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
         "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
