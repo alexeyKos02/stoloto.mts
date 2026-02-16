@@ -1,4 +1,4 @@
-name: Sync SOURCE (inside workbook)
+name: Sync BOTH (INSIDE + SOURCE->TARGET)
 
 on:
   workflow_dispatch:
@@ -24,11 +24,10 @@ jobs:
             -H "Authorization: OAuth ${YANDEX_OAUTH_TOKEN}" \
             "https://cloud-api.yandex.net/v1/disk/"
 
-      - name: Run sync (inside SOURCE only)
+      - name: Run sync (BOTH)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-          RUN_INSIDE_SOURCE: "1"
-          RUN_SYNC_TO_TARGET: "0"
+          SYNC_MODE: "both"
         run: python sync_xlsx.py

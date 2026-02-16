@@ -2,7 +2,7 @@ import io
 import os
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import requests
 from openpyxl import load_workbook
@@ -16,7 +16,16 @@ from openpyxl.styles import PatternFill
 # =======================
 YANDEX_OAUTH_TOKEN = os.getenv("YANDEX_OAUTH_TOKEN", "").strip()
 DISK_SOURCE_PATH = os.getenv("DISK_SOURCE_PATH", "").strip()
-DISK_TARGET_PATH = os.getenv("DISK_TARGET_PATH", "").strip()  # может быть пустым, но НЕ УДАЛЯТЬ
+DISK_TARGET_PATH = os.getenv("DISK_TARGET_PATH", "").strip()  # используется для второго файла
+
+# Режимы:
+#   inside  -> только внутри SOURCE (БД -> СВОДНАЯ)
+#   target  -> только SOURCE -> TARGET (как твой Apps Script)
+#   both    -> сначала inside, потом target
+SYNC_MODE = os.getenv("SYNC_MODE", "inside").strip().lower()
+
+# Если "1" -> удаляем из СВОДНОЙ агентов, которых нет в БД
+DELETE_MISSING_FROM_SVOD = os.getenv("DELETE_MISSING_FROM_SVOD", "0").strip() == "1"
 
 if not YANDEX_OAUTH_TOKEN:
     raise RuntimeError("ERROR: YANDEX_OAUTH_TOKEN is empty (set it in GitHub Secrets)")
@@ -28,20 +37,7 @@ HEADERS = {"Authorization": f"OAuth {YANDEX_OAUTH_TOKEN}"}
 
 
 # =======================
-# FLAGS (не обязательно, но удобно)
-# =======================
-# по умолчанию запускаем обе логики
-RUN_INSIDE_SOURCE = os.getenv("RUN_INSIDE_SOURCE", "1").strip() != "0"
-RUN_SYNC_TO_TARGET = os.getenv("RUN_SYNC_TO_TARGET", "1").strip() != "0"
-
-# важно: новая логика требует DISK_TARGET_PATH
-# но мы НЕ валим скрипт, если ты временно хочешь запускать только старую
-if RUN_SYNC_TO_TARGET and not DISK_TARGET_PATH:
-    raise RuntimeError("ERROR: DISK_TARGET_PATH is empty, but RUN_SYNC_TO_TARGET=1")
-
-
-# =======================
-# CONFIG: старая логика (БД -> СВОДНАЯ)
+# CONFIG (ЛИСТЫ/КОЛОНКИ) — внутри SOURCE
 # =======================
 SHEET_BD = "БД"
 SHEET_SVOD = "СВОДНАЯ"
@@ -70,18 +66,23 @@ BD_REQUIRED = [
     "Ответственный ССПС",
 ]
 
-# ВАЖНО: если хочешь “удалять из СВОДНОЙ тех, кого удалили из БД” — включи True
-REMOVE_MISSING_FROM_SVOD = True
-
 
 # =======================
-# CONFIG: новая логика (SOURCE СВОДНАЯ -> TARGET файл)
+# CONFIG — SOURCE -> TARGET (второй файл)
 # =======================
-SOURCE_SHEET_NAME = "СВОДНАЯ"
-TARGET_SHEET_NAME = "Лист1"
+# откуда читаем
+SRC_SHEET_FOR_TARGET_SYNC = os.getenv("SRC_SHEET_FOR_TARGET_SYNC", "СВОДНАЯ").strip()
 
-KEY_COL = "ЮЛ"
-COLUMNS_TO_SYNC = ["ЮЛ", "Terminal ID (Столото)", "МТС ID"]
+# куда пишем
+TARGET_SHEET_NAME = os.getenv("TARGET_SHEET_NAME", "Лист1").strip()
+
+# ключ и колонки (как в твоём Apps Script)
+TARGET_KEY_COL = os.getenv("TARGET_KEY_COL", "ЮЛ").strip()
+TARGET_COLUMNS_TO_SYNC = [
+    "ЮЛ",
+    "Terminal ID (Столото)",
+    "МТС ID",
+]
 
 
 # =======================
@@ -98,13 +99,13 @@ def disk_download(path: str) -> bytes:
         raise RuntimeError(f"DOWNLOAD ERROR: {r.status_code}\nPATH: {path}\nBODY: {r.text}")
     href = r.json()["href"]
 
-    f = requests.get(href, timeout=240)
+    f = requests.get(href, timeout=180)
     if f.status_code >= 400:
         raise RuntimeError(f"DOWNLOAD(HREF) ERROR: {f.status_code}\nHREF: {href}\nBODY: {f.text}")
     return f.content
 
 
-def disk_upload(path: str, content: bytes, retries: int = 10) -> None:
+def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
     r = requests.get(
         f"{YANDEX_API}/resources/upload",
         headers=HEADERS,
@@ -116,7 +117,7 @@ def disk_upload(path: str, content: bytes, retries: int = 10) -> None:
     href = r.json()["href"]
 
     for attempt in range(1, retries + 1):
-        put = requests.put(href, data=content, timeout=300)
+        put = requests.put(href, data=content, timeout=180)
         if put.status_code < 400:
             return
 
@@ -135,7 +136,7 @@ def disk_upload(path: str, content: bytes, retries: int = 10) -> None:
 
 
 # =======================
-# COMMON HELPERS
+# HELPERS: columns
 # =======================
 def header_index_map(ws: Worksheet) -> Dict[str, int]:
     m: Dict[str, int] = {}
@@ -169,7 +170,7 @@ def is_empty_cell(v) -> bool:
 
 
 # =======================
-# TERMINAL RANGES (старая логика)
+# TERMINAL RANGES
 # =======================
 def parse_terminal_id(x) -> Optional[int]:
     s = "".join(ch for ch in str(x) if ch.isdigit())
@@ -208,7 +209,7 @@ def format_ranges(ranges: List[Tuple[int, int]]) -> str:
 
 
 # =======================
-# CONDITIONAL FORMATTING (старая логика)
+# CONDITIONAL FORMATTING (0/1)
 # =======================
 FILL_GREEN = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 FILL_RED = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
@@ -224,19 +225,22 @@ def col_to_letter(n: int) -> str:
 
 
 def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
+    if end_row < start_row:
+        return
     rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
+    first = f"{col_letter}{start_row}"
 
     ws.conditional_formatting.add(
         rng,
-        FormulaRule(formula=[f'LEN(TRIM({col_letter}{start_row}))=0'], fill=FILL_GRAY, stopIfTrue=False),
+        FormulaRule(formula=[f"LEN(TRIM({first}))=0"], fill=FILL_GRAY, stopIfTrue=False),
     )
     ws.conditional_formatting.add(
         rng,
-        FormulaRule(formula=[f'{col_letter}{start_row}=1'], fill=FILL_GREEN, stopIfTrue=False),
+        FormulaRule(formula=[f"{first}=1"], fill=FILL_GREEN, stopIfTrue=False),
     )
     ws.conditional_formatting.add(
         rng,
-        FormulaRule(formula=[f'{col_letter}{start_row}=0'], fill=FILL_RED, stopIfTrue=False),
+        FormulaRule(formula=[f"{first}=0"], fill=FILL_RED, stopIfTrue=False),
     )
 
 
@@ -261,16 +265,13 @@ def normalize_bool_to_01(v) -> Optional[int]:
 
 
 # =======================
-# OLD LOGIC: inside SOURCE workbook (БД -> СВОДНАЯ)
+# INSIDE SOURCE SYNC (БД -> СВОДНАЯ)
 # =======================
 def ensure_svod_columns(ws_svod: Worksheet) -> None:
     ensure_columns_at_end(ws_svod, SVOD_BOOL_COLS)
 
 
-def sync_inside_source_workbook(src_bytes: bytes) -> Tuple[bytes, int, int, int]:
-    """
-    Возвращает: (bytes, inserted, updated, deleted)
-    """
+def sync_inside_workbook(src_bytes: bytes) -> bytes:
     wb = load_workbook(io.BytesIO(src_bytes))
 
     if SHEET_BD not in wb.sheetnames:
@@ -281,7 +282,7 @@ def sync_inside_source_workbook(src_bytes: bytes) -> Tuple[bytes, int, int, int]
     ws_bd = wb[SHEET_BD]
     ws_svod = wb[SHEET_SVOD]
 
-    # 1) гарантируем 3 булевых столбца
+    print(f'Ensure columns in "{SHEET_SVOD}"...')
     ensure_svod_columns(ws_svod)
 
     bd_map = header_index_map(ws_bd)
@@ -321,7 +322,6 @@ def sync_inside_source_workbook(src_bytes: bytes) -> Tuple[bytes, int, int, int]
         rngs = compress_ranges(nums)
         bd_by_agent[agent]["Terminal ID (Столото)"] = format_ranges(rngs)
 
-    # существующие строки в СВОДНОЙ по агенту
     agent_col_sv = sv_map["Агент ID (Столото)"]
     existing_row_by_agent: Dict[str, int] = {}
     for r in range(2, ws_svod.max_row + 1):
@@ -332,7 +332,9 @@ def sync_inside_source_workbook(src_bytes: bytes) -> Tuple[bytes, int, int, int]
     inserted = 0
     updated = 0
 
-    # update + insert
+    sv_map = header_index_map(ws_svod)
+    bool_cols_idx = {name: sv_map[name] for name in SVOD_BOOL_COLS}
+
     for agent, payload in bd_by_agent.items():
         if agent in existing_row_by_agent:
             rr = existing_row_by_agent[agent]
@@ -343,26 +345,22 @@ def sync_inside_source_workbook(src_bytes: bytes) -> Tuple[bytes, int, int, int]
             rr = ws_svod.max_row + 1
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            # новые булевые — пустыми
-            sv_map2 = header_index_map(ws_svod)
             for col_name in SVOD_BOOL_COLS:
-                ws_svod.cell(row=rr, column=sv_map2[col_name]).value = None
+                ws_svod.cell(row=rr, column=bool_cols_idx[col_name]).value = None
             inserted += 1
 
-    deleted = 0
-    if REMOVE_MISSING_FROM_SVOD:
-        # удаляем строки в СВОДНОЙ, которых нет в БД (по агенту)
-        source_agents = set(bd_by_agent.keys())
-        to_delete_rows: List[int] = []
-        for agent, rr in existing_row_by_agent.items():
-            if agent not in source_agents:
-                to_delete_rows.append(rr)
-        # удаляем снизу вверх
-        for rr in sorted(to_delete_rows, reverse=True):
-            ws_svod.delete_rows(rr, 1)
-            deleted += 1
+    cleared = 0
+    if DELETE_MISSING_FROM_SVOD:
+        bd_agents = set(bd_by_agent.keys())
+        rows_to_delete = []
+        for r in range(2, ws_svod.max_row + 1):
+            agent = get_cell_str(ws_svod, r, agent_col_sv)
+            if agent and agent not in bd_agents:
+                rows_to_delete.append(r)
+        for r in reversed(rows_to_delete):
+            ws_svod.delete_rows(r, 1)
+            cleared += 1
 
-    # нормализуем 3 булевые в 0/1 (без трогания пустых/странных)
     sv_map = header_index_map(ws_svod)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
@@ -375,157 +373,151 @@ def sync_inside_source_workbook(src_bytes: bytes) -> Tuple[bytes, int, int, int]
                 continue
             ws_svod.cell(row=r, column=c).value = norm
 
-    # переустановить условное форматирование на 3 колонки
     end_row = max(ws_svod.max_row, 2)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
         letter = col_to_letter(c)
         apply_bool_cf(ws_svod, letter, start_row=2, end_row=end_row)
 
+    print(
+        f"Inside sync done: inserted={inserted}, updated={updated}, "
+        f"deleted={cleared}, total_source_agents={len(bd_by_agent)}"
+    )
+
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue(), inserted, updated, deleted
+    return out.getvalue()
 
 
 # =======================
-# NEW LOGIC: SOURCE СВОДНАЯ -> TARGET workbook sheet by ЮЛ
+# SOURCE -> TARGET SYNC (как твой Apps Script)
 # =======================
-def get_or_create_sheet(wb, name: str) -> Worksheet:
-    if name in wb.sheetnames:
-        return wb[name]
-    return wb.create_sheet(name)
+def ensure_target_columns(ws_target: Worksheet, needed: List[str]) -> Dict[str, int]:
+    ensure_columns_at_end(ws_target, needed)
+    return header_index_map(ws_target)
 
 
-def is_header_row_empty(ws: Worksheet) -> bool:
-    if ws.max_row < 1:
-        return True
-    # если вообще нет колонок
-    if ws.max_column < 1:
-        return True
-    for c in range(1, ws.max_column + 1):
-        if not is_empty_cell(ws.cell(row=1, column=c).value):
-            return False
-    return True
-
-
-def sync_source_svod_to_target_workbook(source_bytes: bytes, target_bytes: bytes) -> Tuple[bytes, int, int]:
+def build_source_map_for_target(ws_source: Worksheet) -> Dict[str, Dict[str, str]]:
     """
-    Как syncDataWithNewRows():
-    - читаем SOURCE_SHEET_NAME из source_bytes
-    - пишем в TARGET_SHEET_NAME target_bytes
-    - key=ЮЛ
-    - обновляем существующие
-    - добавляем новые
-    - НЕ удаляем лишние в target
+    Возвращает map по ключу TARGET_KEY_COL (обычно 'ЮЛ'):
+      key -> {colName -> value}
     """
-    src_wb = load_workbook(io.BytesIO(source_bytes))
-    tgt_wb = load_workbook(io.BytesIO(target_bytes))
+    src_headers = header_index_map(ws_source)
+    for col in TARGET_COLUMNS_TO_SYNC:
+        if col not in src_headers:
+            raise RuntimeError(f'SOURCE sheet "{ws_source.title}": missing column "{col}"')
 
-    if SOURCE_SHEET_NAME not in src_wb.sheetnames:
-        raise RuntimeError(f'SOURCE: sheet "{SOURCE_SHEET_NAME}" not found')
-    src_ws = src_wb[SOURCE_SHEET_NAME]
+    key_col_idx = src_headers[TARGET_KEY_COL]
+    out: Dict[str, Dict[str, str]] = {}
 
-    tgt_ws = get_or_create_sheet(tgt_wb, TARGET_SHEET_NAME)
-
-    # если target лист пустой — создаём заголовки
-    if is_header_row_empty(tgt_ws):
-        # чистим лист (на всякий)
-        if tgt_ws.max_row > 0:
-            tgt_ws.delete_rows(1, tgt_ws.max_row)
-        tgt_ws.append(COLUMNS_TO_SYNC)
-
-    # гарантируем колонки
-    ensure_columns_at_end(tgt_ws, COLUMNS_TO_SYNC)
-
-    src_map = header_index_map(src_ws)
-    tgt_map = header_index_map(tgt_ws)
-
-    missing_in_src = [c for c in COLUMNS_TO_SYNC if c not in src_map]
-    if missing_in_src:
-        raise RuntimeError(f'SOURCE "{SOURCE_SHEET_NAME}" missing columns: {missing_in_src}')
-    if KEY_COL not in tgt_map:
-        raise RuntimeError(f'TARGET "{TARGET_SHEET_NAME}" missing key column: "{KEY_COL}"')
-
-    key_src_col = src_map[KEY_COL]
-    src_cols = [src_map[c] for c in COLUMNS_TO_SYNC]
-
-    source_by_key: Dict[str, List[object]] = {}
-    for r in range(2, src_ws.max_row + 1):
-        key = get_cell_str(src_ws, r, key_src_col)
+    for r in range(2, ws_source.max_row + 1):
+        key = get_cell_str(ws_source, r, key_col_idx)
         if not key:
             continue
-        vals = [src_ws.cell(row=r, column=c).value for c in src_cols]
-        source_by_key[key] = vals
+        row_payload = {}
+        for col in TARGET_COLUMNS_TO_SYNC:
+            row_payload[col] = get_cell_str(ws_source, r, src_headers[col])
+        out[key] = row_payload
+
+    return out
+
+
+def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
+    """
+    Берём данные из SOURCE(SVODNA) и синкаем в TARGET(Лист1) по ключу 'ЮЛ'.
+    Обновляем существующие строки + добавляем новые.
+    НЕ чистим лист, чтобы не убить форматирование.
+    """
+    wb_src = load_workbook(io.BytesIO(source_bytes))
+    if SRC_SHEET_FOR_TARGET_SYNC not in wb_src.sheetnames:
+        raise RuntimeError(f'SOURCE workbook: sheet "{SRC_SHEET_FOR_TARGET_SYNC}" not found')
+    ws_src = wb_src[SRC_SHEET_FOR_TARGET_SYNC]
+
+    wb_tgt = load_workbook(io.BytesIO(target_bytes))
+    if TARGET_SHEET_NAME in wb_tgt.sheetnames:
+        ws_tgt = wb_tgt[TARGET_SHEET_NAME]
+    else:
+        ws_tgt = wb_tgt.create_sheet(TARGET_SHEET_NAME)
+
+    # заголовки target: если лист пустой — создаём шапку
+    if ws_tgt.max_row < 1 or ws_tgt.max_column < 1 or is_empty_cell(ws_tgt.cell(1, 1).value):
+        for i, name in enumerate(TARGET_COLUMNS_TO_SYNC, start=1):
+            ws_tgt.cell(row=1, column=i).value = name
+
+    tgt_headers = ensure_target_columns(ws_tgt, TARGET_COLUMNS_TO_SYNC)
+    if TARGET_KEY_COL not in tgt_headers:
+        raise RuntimeError(f'TARGET sheet "{TARGET_SHEET_NAME}": missing key column "{TARGET_KEY_COL}"')
+
+    # source map
+    src_map = build_source_map_for_target(ws_src)
 
     # existing keys in target
-    key_tgt_col = tgt_map[KEY_COL]
+    key_col_tgt = tgt_headers[TARGET_KEY_COL]
     existing_row_by_key: Dict[str, int] = {}
-    for r in range(2, tgt_ws.max_row + 1):
-        key = get_cell_str(tgt_ws, r, key_tgt_col)
+    for r in range(2, ws_tgt.max_row + 1):
+        key = get_cell_str(ws_tgt, r, key_col_tgt)
         if key:
             existing_row_by_key[key] = r
 
     updated = 0
     added = 0
 
-    # update
-    for key, rr in existing_row_by_key.items():
-        if key not in source_by_key:
-            continue
-        vals = source_by_key[key]
-        for i, col_name in enumerate(COLUMNS_TO_SYNC):
-            tgt_ws.cell(row=rr, column=tgt_map[col_name]).value = vals[i]
-        updated += 1
-        del source_by_key[key]
+    # update / add
+    for key, payload in src_map.items():
+        if key in existing_row_by_key:
+            rr = existing_row_by_key[key]
+            for col in TARGET_COLUMNS_TO_SYNC:
+                cc = tgt_headers[col]
+                ws_tgt.cell(row=rr, column=cc).value = payload.get(col, "")
+            updated += 1
+        else:
+            rr = ws_tgt.max_row + 1
+            for col in TARGET_COLUMNS_TO_SYNC:
+                cc = tgt_headers[col]
+                ws_tgt.cell(row=rr, column=cc).value = payload.get(col, "")
+            added += 1
 
-    # append new
-    for key, vals in source_by_key.items():
-        rr = tgt_ws.max_row + 1
-        for i, col_name in enumerate(COLUMNS_TO_SYNC):
-            tgt_ws.cell(row=rr, column=tgt_map[col_name]).value = vals[i]
-        added += 1
+    print(f"Target sync done: updated={updated}, added={added}, source_rows={len(src_map)}")
 
     out = io.BytesIO()
-    tgt_wb.save(out)
-    return out.getvalue(), updated, added
+    wb_tgt.save(out)
+    return out.getvalue()
 
 
 # =======================
 # ENTRYPOINT
 # =======================
 def main() -> None:
-    run_inside = os.getenv("RUN_INSIDE_SOURCE", "1") == "1"
-    run_to_target = os.getenv("RUN_SYNC_TO_TARGET", "0") == "1"
-
     print(f"Download SOURCE: {DISK_SOURCE_PATH}")
     src = disk_download(DISK_SOURCE_PATH)
+    print(f"downloaded SOURCE: {len(src)} bytes")
 
-    out_source_bytes = src
+    if SYNC_MODE not in ("inside", "target", "both"):
+        raise RuntimeError("SYNC_MODE must be one of: inside | target | both")
 
-    # 1) Логика внутри SOURCE (БД -> СВОДНАЯ)
-    if run_inside:
-        print("Running inside SOURCE sync...")
-        out_source_bytes = sync_inside_workbook(src)
+    src_after = src
 
+    if SYNC_MODE in ("inside", "both"):
+        print("Running INSIDE SOURCE sync (БД -> СВОДНАЯ)...")
+        src_after = sync_inside_workbook(src)
         print(f"Upload back to SOURCE: {DISK_SOURCE_PATH}")
-        disk_upload(DISK_SOURCE_PATH, out_source_bytes)
+        disk_upload(DISK_SOURCE_PATH, src_after)
 
-    # 2) Логика SOURCE -> TARGET (во второй файл)
-    if run_to_target:
+    if SYNC_MODE in ("target", "both"):
         if not DISK_TARGET_PATH:
-            raise RuntimeError("DISK_TARGET_PATH is empty")
+            raise RuntimeError("ERROR: DISK_TARGET_PATH is empty (set it in GitHub Secrets)")
 
         print(f"Download TARGET: {DISK_TARGET_PATH}")
         tgt = disk_download(DISK_TARGET_PATH)
+        print(f"downloaded TARGET: {len(tgt)} bytes")
 
         print("Running SOURCE -> TARGET sync...")
-        out_target_bytes = sync_to_second_file(out_source_bytes, tgt)
+        tgt_after = sync_source_to_target(src_after, tgt)
 
         print(f"Upload back to TARGET: {DISK_TARGET_PATH}")
-        disk_upload(DISK_TARGET_PATH, out_target_bytes)
+        disk_upload(DISK_TARGET_PATH, tgt_after)
 
     print("✅ Done")
-
 
 
 if __name__ == "__main__":

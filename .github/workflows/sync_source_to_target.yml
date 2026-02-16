@@ -24,11 +24,10 @@ jobs:
             -H "Authorization: OAuth ${YANDEX_OAUTH_TOKEN}" \
             "https://cloud-api.yandex.net/v1/disk/"
 
-      - name: Run sync (SOURCE -> TARGET only)
+      - name: Run sync (SOURCE -> TARGET)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-          RUN_INSIDE_SOURCE: "0"
-          RUN_SYNC_TO_TARGET: "1"
+          SYNC_MODE: "target"
         run: python sync_xlsx.py
