@@ -172,6 +172,11 @@ def find_reusable_empty_rows(ws: Worksheet, sv_map: Dict[str, int]) -> List[int]
             empties.append(r)
     return empties
 
+def clear_row_cells(ws: Worksheet, row: int, cols_1based: List[int]) -> None:
+    for c in cols_1based:
+        ws.cell(row=row, column=c).value = None
+
+
 # =======================
 # STYLE COPY (табличное оформление)
 # =======================
@@ -395,6 +400,34 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
                 ws_svod.cell(row=rr, column=sv_map2[col_name]).value = 0
 
             inserted += 1
+    # 5.5) CLEANUP: если агент удалён из БД — очищаем строку в СВОДНАЯ
+    source_agents = set(bd_by_agent.keys())
+
+    # актуальная карта колонок
+    sv_map = header_index_map(ws_svod)
+
+    agent_col_sv = sv_map["Агент ID (Столото)"]
+
+    # что чистим при удалении агента из БД:
+    # - все базовые колонки
+    # - плюс 3 булевых (чтобы строка стала реально пустой и переиспользовалась)
+    cols_to_clear_names = list(SVOD_REQUIRED_BASE) + list(SVOD_BOOL_COLS)
+
+    cols_to_clear = []
+    for name in cols_to_clear_names:
+        if name in sv_map:
+            cols_to_clear.append(sv_map[name])
+
+    cleared = 0
+    for r in range(2, ws_svod.max_row + 1):
+        agent = get_cell_str(ws_svod, r, agent_col_sv)
+        if not agent:
+            continue
+        if agent not in source_agents:
+            clear_row_cells(ws_svod, r, cols_to_clear)
+            cleared += 1
+
+    print(f"Cleanup done: cleared_rows={cleared}")
 
     # 6) Нормализуем существующие значения в 3 столбцах к 0/1 (НЕ трогаем пустые и "странные")
     sv_map = header_index_map(ws_svod)
