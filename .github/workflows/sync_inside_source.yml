@@ -16,18 +16,11 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Check Yandex Disk API доступ
-        env:
-          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
-        run: |
-          curl -s -D- -o /dev/null \
-            -H "Authorization: OAuth ${YANDEX_OAUTH_TOKEN}" \
-            "https://cloud-api.yandex.net/v1/disk/"
-
       - name: Run sync (INSIDE SOURCE)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
-          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-          SYNC_MODE: "inside"
+          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }} # не используем, но НЕ УДАЛЯТЬ
+          RUN_INSIDE_SOURCE: "1"
+          RUN_SYNC_TO_TARGET: "0"
         run: python sync_xlsx.py

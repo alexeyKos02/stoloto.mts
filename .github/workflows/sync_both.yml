@@ -1,4 +1,4 @@
-name: Sync BOTH (INSIDE + SOURCE->TARGET)
+name: Sync BOTH (INSIDE + SOURCE -> TARGET)
 
 on:
   workflow_dispatch:
@@ -16,18 +16,15 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Check Yandex Disk API доступ
-        env:
-          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
-        run: |
-          curl -s -D- -o /dev/null \
-            -H "Authorization: OAuth ${YANDEX_OAUTH_TOKEN}" \
-            "https://cloud-api.yandex.net/v1/disk/"
-
       - name: Run sync (BOTH)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-          SYNC_MODE: "both"
+          RUN_INSIDE_SOURCE: "1"
+          RUN_SYNC_TO_TARGET: "1"
+          SRC_SHEET_FOR_EXPORT: "СВОДНАЯ"
+          TGT_SHEET_FOR_IMPORT: "Лист1"
+          KEY_COLUMN_EXPORT: "ЮЛ"
+          COLUMNS_TO_SYNC_EXPORT: "ЮЛ|Terminal ID (Столото)|МТС ID"
         run: python sync_xlsx.py
