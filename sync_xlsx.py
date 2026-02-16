@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import time
+from copy import copy
 from typing import Dict, List, Tuple, Optional, Set
 
 import requests
@@ -46,14 +47,12 @@ HEADERS = {"Authorization": f"OAuth {YANDEX_OAUTH_TOKEN}"}
 SHEET_BD = "БД"
 SHEET_SVOD = "СВОДНАЯ"
 
-# Эти 3 столбца должны быть в СВОДНАЯ (и под них ставим условное форматирование)
 SVOD_BOOL_COLS = [
     "Добавлен сертификат",
     "Добавлен сертификат (МТС)",
     "Билеты продаются",
 ]
 
-# Базовые обязательные колонки в СВОДНАЯ
 SVOD_REQUIRED_BASE = [
     "ЮЛ",
     "МТС ID",
@@ -63,7 +62,6 @@ SVOD_REQUIRED_BASE = [
     "Ответственный ССПС",
 ]
 
-# Колонки, которые берем из БД для сборки витрины по агенту
 BD_REQUIRED = [
     "ЮЛ",
     "МТС ID",
@@ -139,14 +137,8 @@ def header_index_map(ws: Worksheet) -> Dict[str, int]:
     return m
 
 
-def ensure_columns_at_end(ws: Worksheet, needed: List[str]) -> None:
-    m = header_index_map(ws)
-    last = ws.max_column
-    for name in needed:
-        if name not in m:
-            last += 1
-            ws.cell(row=1, column=last).value = name
-            m[name] = last
+def is_empty_cell(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
 
 
 def get_cell_str(ws: Worksheet, r: int, c: int) -> str:
@@ -154,24 +146,33 @@ def get_cell_str(ws: Worksheet, r: int, c: int) -> str:
     return "" if v is None else str(v).strip()
 
 
-def is_empty_cell(v) -> bool:
-    return v is None or (isinstance(v, str) and v.strip() == "")
+def col_to_letter(n: int) -> str:
+    s = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
 
 # =======================
-# FIX: "последняя строка данных", а не max_row
+# STYLE COPY (FIX StyleProxy crash)
 # =======================
-def get_last_data_row(ws: Worksheet, key_col: int, start_row: int = 2) -> int:
+def copy_cell_style(src_cell, dst_cell) -> None:
     """
-    Возвращает последнюю строку, где в key_col есть значение.
-    Это лечит ситуацию "внизу пусто, но форматировано => max_row большой".
+    Важно: copy() чтобы не тащить StyleProxy и не словить unhashable StyleProxy на save().
     """
-    last = 1
-    for r in range(start_row, ws.max_row + 1):
-        v = ws.cell(row=r, column=key_col).value
-        if not is_empty_cell(v):
-            last = r
-    return last
+    if not src_cell.has_style:
+        return
+
+    dst_cell._style = copy(src_cell._style)
+
+    # продублируем явно (это нормально и безопасно)
+    dst_cell.font = copy(src_cell.font)
+    dst_cell.border = copy(src_cell.border)
+    dst_cell.fill = copy(src_cell.fill)
+    dst_cell.number_format = src_cell.number_format
+    dst_cell.protection = copy(src_cell.protection)
+    dst_cell.alignment = copy(src_cell.alignment)
 
 
 def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int) -> None:
@@ -187,15 +188,53 @@ def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int) -> N
     for c in range(1, max_col + 1):
         s = ws.cell(row=src_row, column=c)
         d = ws.cell(row=dst_row, column=c)
+        copy_cell_style(s, d)
 
-        if s.has_style:
-            d._style = s._style
-            d.font = s.font
-            d.border = s.border
-            d.fill = s.fill
-            d.number_format = s.number_format
-            d.protection = s.protection
-            d.alignment = s.alignment
+
+def ensure_columns_at_end(ws: Worksheet, needed: List[str]) -> None:
+    """
+    Добавляем отсутствующие колонки в конец.
+    Чтобы не ломать форматирование/ширины — копируем стиль заголовка и ширину
+    с последней существующей колонки.
+    """
+    m = header_index_map(ws)
+    last = ws.max_column
+
+    # шаблонный заголовок и ширина — от последней существующей колонки
+    template_col = last if last >= 1 else 1
+    template_header = ws.cell(row=1, column=template_col)
+    template_letter = col_to_letter(template_col)
+    template_width = ws.column_dimensions[template_letter].width
+
+    for name in needed:
+        if name in m:
+            continue
+        last += 1
+
+        dst_header = ws.cell(row=1, column=last)
+        dst_header.value = name
+
+        # стиль заголовка
+        copy_cell_style(template_header, dst_header)
+
+        # ширина
+        new_letter = col_to_letter(last)
+        if template_width is not None:
+            ws.column_dimensions[new_letter].width = template_width
+
+        m[name] = last
+
+
+# =======================
+# FIX: "последняя строка данных", а не max_row
+# =======================
+def get_last_data_row(ws: Worksheet, key_col: int, start_row: int = 2) -> int:
+    last = 1
+    for r in range(start_row, ws.max_row + 1):
+        v = ws.cell(row=r, column=key_col).value
+        if not is_empty_cell(v):
+            last = r
+    return last
 
 
 # =======================
@@ -245,27 +284,10 @@ FILL_RED = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="soli
 FILL_GRAY = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
 
 
-def col_to_letter(n: int) -> str:
-    s = ""
-    while n:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
 def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
-    """
-    CF на колонку:
-    - пусто -> серый
-    - 1 -> зелёный
-    - 0 -> красный
-    """
     if end_row < start_row:
         end_row = start_row
     rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
-
-    # Важно: формулы должны ссылаться на ПЕРВУЮ строку диапазона.
-    # Excel/Яндекс протянут их на остальные строки.
     r0 = start_row
 
     ws.conditional_formatting.add(
@@ -302,9 +324,6 @@ def normalize_bool_to_01(v) -> Optional[int]:
     return None
 
 
-# =======================
-# SVOD columns ensure
-# =======================
 def ensure_svod_columns(ws_svod: Worksheet) -> None:
     ensure_columns_at_end(ws_svod, SVOD_BOOL_COLS)
 
@@ -313,12 +332,7 @@ def ensure_svod_columns(ws_svod: Worksheet) -> None:
 # DELETE agents removed from BD
 # =======================
 def delete_missing_agents(ws_svod: Worksheet, sv_map: Dict[str, int], agents_in_bd: Set[str]) -> int:
-    """
-    Удаляет строки из СВОДНОЙ, где Агент ID есть, но его нет в БД.
-    Удаляем СНИЗУ ВВЕРХ.
-    """
     agent_col = sv_map["Агент ID (Столото)"]
-    # границу берём по "реальным данным"
     last_data = get_last_data_row(ws_svod, agent_col, start_row=2)
     if last_data < 2:
         return 0
@@ -351,11 +365,9 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     ws_bd = wb[SHEET_BD]
     ws_svod = wb[SHEET_SVOD]
 
-    # 1) гарантируем, что в СВОДНАЯ есть 3 новых столбца
     print(f'Ensure columns in "{SHEET_SVOD}"...')
     ensure_svod_columns(ws_svod)
 
-    # 2) Проверяем базовые колонки
     bd_map = header_index_map(ws_bd)
     sv_map = header_index_map(ws_svod)
 
@@ -367,7 +379,6 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     if missing_svod:
         raise RuntimeError(f'Missing columns in "{SHEET_SVOD}": {missing_svod}')
 
-    # 3) Читаем БД: агрегируем по агенту + диапазоны терминалов
     agent_col_bd = bd_map["Агент ID (Столото)"]
     terminal_col_bd = bd_map["Terminal ID (Столото)"]
 
@@ -397,32 +408,33 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
         rngs = compress_ranges(nums)
         bd_by_agent[agent]["Terminal ID (Столото)"] = format_ranges(rngs)
 
-    # 4) Удаляем из СВОДНОЙ то, чего больше нет в БД
     deleted = delete_missing_agents(ws_svod, sv_map, agents_in_bd)
     if deleted:
         print(f"Deleted from SVOD (not in BD): {deleted}")
 
-    # 5) Пересчёт карт после удаления
     sv_map = header_index_map(ws_svod)
     agent_col_sv = sv_map["Агент ID (Столото)"]
 
-    # последняя "реальная" строка данных в СВОДНОЙ
     last_data_row = get_last_data_row(ws_svod, agent_col_sv, start_row=2)
-    template_row = last_data_row if last_data_row >= 2 else 2
+
+    # Шаблон строки ДАННЫХ — строго строка 2 (если она существует), иначе last_data_row
+    if ws_svod.max_row >= 2:
+        template_row = 2
+    else:
+        template_row = last_data_row if last_data_row >= 2 else 2
+
     max_col = ws_svod.max_column
 
-    # 6) Мапа существующих строк по агенту (только до last_data_row)
     existing_row_by_agent: Dict[str, int] = {}
-    for r in range(2, last_data_row + 1):
-        agent = get_cell_str(ws_svod, r, agent_col_sv)
-        if agent:
-            existing_row_by_agent[agent] = r
+    if last_data_row >= 2:
+        for r in range(2, last_data_row + 1):
+            agent = get_cell_str(ws_svod, r, agent_col_sv)
+            if agent:
+                existing_row_by_agent[agent] = r
 
-    # 7) Обновляем/добавляем строки
     inserted = 0
     updated = 0
 
-    # где вставлять новые строки — строго после последней строки данных
     append_row = last_data_row + 1 if last_data_row >= 2 else 2
 
     for agent, payload in bd_by_agent.items():
@@ -435,22 +447,19 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
             rr = append_row
             append_row += 1
 
-            # сначала копируем стиль (чтобы формат/границы/высоты не ломались)
+            # копируем оформление строки-образца (чтобы сетка/заливка/высота не ломались)
             if template_row >= 2 and template_row <= ws_svod.max_row:
                 copy_row_style(ws_svod, template_row, rr, max_col)
 
-            # базовые поля
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
 
-            # новые 3 столбца: если пусто -> пусто (человек руками поставит 0/1)
             for col_name in SVOD_BOOL_COLS:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = None
 
             inserted += 1
 
-    # 8) Приводим значения 3 булевых столбцов к 0/1, НЕ трогаем пустые/странные
-    # Границу снова считаем по "реальным данным"
+    # нормализация 0/1 только по реальным данным
     last_data_row = get_last_data_row(ws_svod, agent_col_sv, start_row=2)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
@@ -463,7 +472,7 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
                 continue
             ws_svod.cell(row=r, column=c).value = norm
 
-    # 9) Переустанавливаем условное форматирование на "реальный" диапазон данных
+    # CF на реальные строки данных
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
         letter = col_to_letter(c)
@@ -488,11 +497,6 @@ def parse_columns_list(s: str) -> List[str]:
 
 
 def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
-    """
-    Берём SRC_SHEET_FOR_EXPORT из source и синкаем в TGT_SHEET_FOR_IMPORT в target по ключу KEY_COLUMN_EXPORT.
-    - обновляем существующие
-    - добавляем новые
-    """
     wb_src = load_workbook(io.BytesIO(source_bytes))
     wb_tgt = load_workbook(io.BytesIO(target_bytes))
 
@@ -500,30 +504,32 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
         raise RuntimeError(f'Source file: sheet "{SRC_SHEET_FOR_EXPORT}" not found')
     ws_src = wb_src[SRC_SHEET_FOR_EXPORT]
 
-    ws_tgt = wb_tgt[TGT_SHEET_FOR_IMPORT] if TGT_SHEET_FOR_IMPORT in wb_tgt.sheetnames else wb_tgt.create_sheet(TGT_SHEET_FOR_IMPORT)
+    ws_tgt = (
+        wb_tgt[TGT_SHEET_FOR_IMPORT]
+        if TGT_SHEET_FOR_IMPORT in wb_tgt.sheetnames
+        else wb_tgt.create_sheet(TGT_SHEET_FOR_IMPORT)
+    )
 
     cols = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
     if KEY_COLUMN_EXPORT not in cols:
-        # ключ должен быть среди синкаемых, иначе странно
         cols = [KEY_COLUMN_EXPORT] + cols
 
     src_map = header_index_map(ws_src)
     tgt_map = header_index_map(ws_tgt)
 
-    # ensure headers in target
     for name in cols:
         if name not in tgt_map:
             ws_tgt.cell(row=1, column=ws_tgt.max_column + 1).value = name
     tgt_map = header_index_map(ws_tgt)
 
     if KEY_COLUMN_EXPORT not in src_map:
-        raise RuntimeError(f'Source sheet "{SRC_SHEET_FOR_EXPORT}": key column "{KEY_COLUMN_EXPORT}" not found')
+        raise RuntimeError(
+            f'Source sheet "{SRC_SHEET_FOR_EXPORT}": key column "{KEY_COLUMN_EXPORT}" not found'
+        )
 
-    # last data rows
     src_last = get_last_data_row(ws_src, src_map[KEY_COLUMN_EXPORT], start_row=2)
     tgt_last = get_last_data_row(ws_tgt, tgt_map[KEY_COLUMN_EXPORT], start_row=2)
 
-    # read source into dict
     src_data: Dict[str, Dict[str, str]] = {}
     for r in range(2, src_last + 1):
         key = get_cell_str(ws_src, r, src_map[KEY_COLUMN_EXPORT])
@@ -531,21 +537,17 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             continue
         row_payload: Dict[str, str] = {}
         for col in cols:
-            if col in src_map:
-                row_payload[col] = get_cell_str(ws_src, r, src_map[col])
-            else:
-                row_payload[col] = ""
+            row_payload[col] = get_cell_str(ws_src, r, src_map[col]) if col in src_map else ""
         src_data[key] = row_payload
 
-    # existing keys in target
     tgt_row_by_key: Dict[str, int] = {}
-    for r in range(2, tgt_last + 1):
-        key = get_cell_str(ws_tgt, r, tgt_map[KEY_COLUMN_EXPORT])
-        if key:
-            tgt_row_by_key[key] = r
+    if tgt_last >= 2:
+        for r in range(2, tgt_last + 1):
+            key = get_cell_str(ws_tgt, r, tgt_map[KEY_COLUMN_EXPORT])
+            if key:
+                tgt_row_by_key[key] = r
 
-    # template style row for target (чтобы новые строки выглядели так же)
-    template_row = tgt_last if tgt_last >= 2 else 2
+    template_row = 2 if ws_tgt.max_row >= 2 else (tgt_last if tgt_last >= 2 else 2)
     max_col = ws_tgt.max_column
 
     updated = 0
