@@ -34,8 +34,9 @@ TGT_SHEET_FOR_IMPORT = os.getenv("TGT_SHEET_FOR_IMPORT", "Лист1").strip()
 KEY_COLUMN_EXPORT = os.getenv("KEY_COLUMN_EXPORT", "ЮЛ").strip()
 COLUMNS_TO_SYNC_EXPORT = os.getenv(
     "COLUMNS_TO_SYNC_EXPORT",
-    "ЮЛ|Terminal ID (Столото)|МТС ID",
+    "ЮЛ|Terminal ID (Столото)|МТС ID|Добавлен сертификат|Добавлен сертификат (МТС)|Билеты продаются",
 ).strip()
+
 
 YANDEX_API = "https://cloud-api.yandex.net/v1/disk"
 HEADERS = {"Authorization": f"OAuth {YANDEX_OAUTH_TOKEN}"}
@@ -603,6 +604,37 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             for col in cols:
                 ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
             inserted += 1
+        # ---------- (B1) Normalize 3 bool columns in TARGET to 0/1 ----------
+    BOOL_COLS = ["Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются"]
+
+    # пересчитаем карту, потому что могли добавить колонки
+    tgt_map = header_index_map(ws_tgt)
+
+    # граница "реальных данных" по ключу (ЮЛ)
+    key_col = tgt_map[KEY_COLUMN_EXPORT]
+    tgt_last = get_last_data_row(ws_tgt, key_col, start_row=2)
+    tgt_last = max(tgt_last, 2)
+
+    for name in BOOL_COLS:
+        if name not in tgt_map:
+            continue
+        c = tgt_map[name]
+        for r in range(2, tgt_last + 1):
+            v = ws_tgt.cell(row=r, column=c).value
+            if is_empty_cell(v):
+                continue
+            norm = normalize_bool_to_01(v)
+            if norm is None:
+                continue
+            ws_tgt.cell(row=r, column=c).value = norm
+        # ---------- (C) Re-apply conditional formatting in TARGET ----------
+    for name in BOOL_COLS:
+        if name not in tgt_map:
+            continue
+        c = tgt_map[name]
+        letter = col_to_letter(c)
+        apply_bool_cf(ws_tgt, letter, start_row=2, end_row=tgt_last)
+
     # --- AUTOTRANSLIT ONLY IN TARGET: fill ENG if empty ---
     ENG_COL = "ENG"
     UL_COL = "ЮЛ"
