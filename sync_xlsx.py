@@ -153,6 +153,30 @@ def col_to_letter(n: int) -> str:
         s = chr(65 + r) + s
     return s
 
+def ru_to_translit_slug(text: str) -> str:
+    m = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+        " ": "_", "_": "_", "-": "-"
+    }
+
+    s = (text or "").strip().lower()
+    out = []
+    for ch in s:
+        if ch in m:
+            out.append(m[ch])
+        elif ch.isalnum() and (("a" <= ch <= "z") or ch.isdigit()):
+            out.append(ch)
+        else:
+            out.append("_")
+
+    slug = "".join(out)
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug.strip("_")
 
 # =======================
 # STYLE COPY (FIX StyleProxy crash)
@@ -511,6 +535,7 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     )
 
     cols = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
+    ENG_COL = "ENG"
     if KEY_COLUMN_EXPORT not in cols:
         cols = [KEY_COLUMN_EXPORT] + cols
 
@@ -520,6 +545,10 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     for name in cols:
         if name not in tgt_map:
             ws_tgt.cell(row=1, column=ws_tgt.max_column + 1).value = name
+# ensure ENG exists ONLY in TARGET
+    tgt_map = header_index_map(ws_tgt)            # обновили карту после добавления cols
+    if ENG_COL not in tgt_map:
+        ws_tgt.cell(row=1, column=ws_tgt.max_column + 1).value = ENG_COL
     tgt_map = header_index_map(ws_tgt)
 
     if KEY_COLUMN_EXPORT not in src_map:
