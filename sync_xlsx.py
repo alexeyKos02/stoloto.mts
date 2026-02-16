@@ -2,7 +2,6 @@ import io
 import os
 import sys
 import time
-from copy import copy
 from typing import Dict, List, Tuple, Optional, Set
 
 import requests
@@ -128,16 +127,6 @@ def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
 # =======================
 # HELPERS: columns / values
 # =======================
-def clone_style(src, dst) -> None:
-    # копируем только “нормальные” объекты стилей (они hashable после copy)
-    dst.font = copy(src.font)
-    dst.fill = copy(src.fill)
-    dst.border = copy(src.border)
-    dst.alignment = copy(src.alignment)
-    dst.number_format = src.number_format
-    dst.protection = copy(src.protection)
-    dst._style = copy(src._style)  # ВАЖНО: именно copy(), а не присваивание
-
 def header_index_map(ws: Worksheet) -> Dict[str, int]:
     m: Dict[str, int] = {}
     for c in range(1, ws.max_column + 1):
@@ -151,42 +140,13 @@ def header_index_map(ws: Worksheet) -> Dict[str, int]:
 
 
 def ensure_columns_at_end(ws: Worksheet, needed: List[str]) -> None:
-    """
-    Добавляет отсутствующие колонки в конец (в первой строке),
-    и аккуратно копирует формат заголовка/колонки с предыдущего столбца.
-    """
     m = header_index_map(ws)
     last = ws.max_column
-
-    # “шаблон” для стиля: берем последнюю существующую колонку (если есть)
-    template_col = last if last >= 1 else None
-
     for name in needed:
-        if name in m:
-            continue
-
-        last += 1
-        cell = ws.cell(row=1, column=last)
-        cell.value = name
-        m[name] = last
-
-        # Сохраняем форматирование заголовка и ширину
-        if template_col is not None:
-            src_header = ws.cell(row=1, column=template_col)
-            try:
-                clone_style(src_header, cell)
-            except Exception:
-                # даже если стиль “кривой”, лучше просто не падать
-                pass
-
-            # ширина колонки
-            try:
-                src_letter = col_to_letter(template_col)
-                dst_letter = col_to_letter(last)
-                ws.column_dimensions[dst_letter].width = ws.column_dimensions[src_letter].width
-            except Exception:
-                pass
-
+        if name not in m:
+            last += 1
+            ws.cell(row=1, column=last).value = name
+            m[name] = last
 
 
 def get_cell_str(ws: Worksheet, r: int, c: int) -> str:
