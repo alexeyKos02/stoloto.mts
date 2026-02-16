@@ -453,9 +453,9 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
 
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-
+            # новые 3 столбца: по умолчанию = 0
             for col_name in SVOD_BOOL_COLS:
-                ws_svod.cell(row=rr, column=sv_map[col_name]).value = None
+                ws_svod.cell(row=rr, column=sv_map[col_name]).value = 0
 
             inserted += 1
 
