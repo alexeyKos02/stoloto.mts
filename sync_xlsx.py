@@ -2,8 +2,6 @@ import io
 import os
 import sys
 import time
-from copy import copy
-from openpyxl.cell.cell import Cell
 from typing import Dict, List, Tuple, Optional, Set
 
 import requests
@@ -129,17 +127,6 @@ def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
 # =======================
 # HELPERS: columns / values
 # =======================
-
-def copy_cell_style(src: Cell, dst: Cell) -> None:
-    # Важно: copy() чтобы не было shared references
-    dst._style = copy(src._style)
-    dst.number_format = src.number_format
-    dst.font = copy(src.font)
-    dst.fill = copy(src.fill)
-    dst.border = copy(src.border)
-    dst.alignment = copy(src.alignment)
-    dst.protection = copy(src.protection)
-
 def header_index_map(ws: Worksheet) -> Dict[str, int]:
     m: Dict[str, int] = {}
     for c in range(1, ws.max_column + 1):
@@ -155,31 +142,11 @@ def header_index_map(ws: Worksheet) -> Dict[str, int]:
 def ensure_columns_at_end(ws: Worksheet, needed: List[str]) -> None:
     m = header_index_map(ws)
     last = ws.max_column
-
-    # “Эталонная” колонка для форматирования заголовка — последняя существующая
-    template_col = last if last >= 1 else 1
-    template_header = ws.cell(row=1, column=template_col)
-
-    template_letter = col_to_letter(template_col)
-    template_width = ws.column_dimensions[template_letter].width
-
     for name in needed:
-        if name in m:
-            continue
-
-        last += 1
-        dst_header = ws.cell(row=1, column=last)
-        dst_header.value = name
-
-        # Копируем стиль заголовка (без set/dict)
-        copy_cell_style(template_header, dst_header)
-
-        # Копируем ширину колонки
-        new_letter = col_to_letter(last)
-        if template_width is not None:
-            ws.column_dimensions[new_letter].width = template_width
-
-        m[name] = last
+        if name not in m:
+            last += 1
+            ws.cell(row=1, column=last).value = name
+            m[name] = last
 
 
 def get_cell_str(ws: Worksheet, r: int, c: int) -> str:
