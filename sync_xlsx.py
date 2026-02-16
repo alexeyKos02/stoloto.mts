@@ -149,6 +149,28 @@ def get_cell_str(ws: Worksheet, r: int, c: int) -> str:
 def is_empty_cell(v) -> bool:
     return v is None or (isinstance(v, str) and v.strip() == "")
 
+def row_is_empty_for_insert(ws: Worksheet, row: int, cols_1based: List[int]) -> bool:
+    """
+    Строка считается пустой, если по указанным колонкам все значения пустые.
+    """
+    for c in cols_1based:
+        v = ws.cell(row=row, column=c).value
+        if not is_empty_cell(v):
+            return False
+    return True
+
+
+def find_reusable_empty_rows(ws: Worksheet, sv_map: Dict[str, int]) -> List[int]:
+    """
+    Ищем пустые строки (которые можно занять) по базовым колонкам.
+    Возвращаем список номеров строк.
+    """
+    base_cols = [sv_map[name] for name in SVOD_REQUIRED_BASE if name in sv_map]
+    empties = []
+    for r in range(2, ws.max_row + 1):
+        if row_is_empty_for_insert(ws, r, base_cols):
+            empties.append(r)
+    return empties
 
 # =======================
 # STYLE COPY (табличное оформление)
@@ -340,6 +362,9 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     inserted = 0
     updated = 0
 
+    reusable_rows = find_reusable_empty_rows(ws_svod, sv_map)
+    reusable_idx = 0
+
     for agent, payload in bd_by_agent.items():
         if agent in existing_row_by_agent:
             rr = existing_row_by_agent[agent]
@@ -348,7 +373,12 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
             updated += 1
         else:
-            rr = ws_svod.max_row + 1
+            if reusable_idx < len(reusable_rows):
+                rr = reusable_rows[reusable_idx]
+                reusable_idx += 1
+            else:
+                rr = ws_svod.max_row + 1
+
 
             # ✅ КОПИРУЕМ СТИЛЬ С ШАБЛОННОЙ СТРОКИ (обычно 2-я строка)
             template_row = 2 if ws_svod.max_row >= 2 else None
