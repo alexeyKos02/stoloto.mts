@@ -603,6 +603,35 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             for col in cols:
                 ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
             inserted += 1
+    # --- AUTOTRANSLIT ONLY IN TARGET: fill ENG if empty ---
+    ENG_COL = "ENG"
+    UL_COL = "ЮЛ"
+
+    if UL_COL in tgt_map and ENG_COL in tgt_map:
+        ul_c = tgt_map[UL_COL]
+        eng_c = tgt_map[ENG_COL]
+
+        # граница "реальных" данных по ЮЛ
+        tgt_last = get_last_data_row(ws_tgt, ul_c, start_row=2)
+
+        filled = 0
+        for r in range(2, tgt_last + 1):
+            ul_val = ws_tgt.cell(row=r, column=ul_c).value
+            eng_val = ws_tgt.cell(row=r, column=eng_c).value
+
+            if is_empty_cell(ul_val):
+                continue
+
+            # ВАЖНО: не перезаписываем ENG, если он уже заполнен
+            if not is_empty_cell(eng_val):
+                continue
+
+            ws_tgt.cell(row=r, column=eng_c).value = ru_to_translit(str(ul_val))
+            filled += 1
+
+        print(f"ENG filled: {filled}")
+    else:
+        print("ENG/ЮЛ columns not found in TARGET — skip ENG fill")
 
     print(f"SOURCE->TARGET sync done: updated={updated}, inserted={inserted}, total_source={len(src_data)}")
 
