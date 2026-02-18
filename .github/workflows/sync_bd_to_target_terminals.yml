@@ -1,0 +1,35 @@
+name: Sync BD SOURCE -> TARGET (терминалы)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Check Yandex Disk API доступ
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+        run: |
+          curl -s -D- -o /dev/null \
+            -H "Authorization: OAuth ${YANDEX_OAUTH_TOKEN}" \
+            "https://cloud-api.yandex.net/v1/disk/"
+
+      - name: Run sync BD -> TARGET/терминалы
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
+          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
+          SRC_SHEET: "БД"
+          TGT_SHEET: "терминалы"
+        run: python sync_bd_source_to_target_terminals.py
