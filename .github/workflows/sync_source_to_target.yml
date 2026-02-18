@@ -1,4 +1,4 @@
-name: Sync SOURCE -> TARGET
+name: Sync SOURCE -> TARGET (mts cert)
 
 on:
   workflow_dispatch:
@@ -27,4 +27,4 @@ jobs:
           TGT_SHEET_FOR_IMPORT: "Лист1"
           KEY_COLUMN_EXPORT: "ЮЛ"
           COLUMNS_TO_SYNC_EXPORT: "ЮЛ|Terminal ID (Столото)|МТС ID"
-        run: python sync_xlsx.py
+        run: python sync_bools_source_to_target.py
