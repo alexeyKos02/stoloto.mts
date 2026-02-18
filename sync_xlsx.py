@@ -665,22 +665,15 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     tgt_last = get_last_data_row(ws_tgt, key_col, start_row=2)
     tgt_last = max(tgt_last, 2)
 
-    for name in BOOL_COLS:
-        if name not in tgt_map:
-            continue
-        c = tgt_map[name]
-        for r in range(2, tgt_last + 1):
-            v = ws_tgt.cell(row=r, column=c).value
+    for col in cols:
+        val = payload.get(col, "")
 
-            # пусто -> ставим 0 (твой запрос “по умолчанию 0”)
-            if is_empty_cell(v):
-                ws_tgt.cell(row=r, column=c).value = 0
-                continue
+        # если это булевая колонка и строка новая — ставим 0
+        if col in BOOL_COLS:
+            val = 0
 
-            norm = normalize_bool_to_01(v)
-            if norm is None:
-                continue
-            ws_tgt.cell(row=r, column=c).value = norm
+        ws_tgt.cell(row=rr, column=tgt_map[col]).value = val
+
 
     # --- re-apply conditional formatting in TARGET ---
     for name in BOOL_COLS:
