@@ -532,6 +532,16 @@ def parse_columns_list(s: str) -> List[str]:
 
 
 def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
+    """
+    Синхронизация SOURCE -> TARGET по ключу KEY_COLUMN_EXPORT.
+
+    ВАЖНО (по твоим требованиям):
+    - Булевые колонки в TARGET ("Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются")
+      НЕ перезаписываем для уже существующих строк.
+    - Для НОВЫХ строк (которых раньше не было в TARGET) — проставляем 0 в этих 3 колонках.
+    - Условное форматирование для этих 3 колонок поддерживаем/переустанавливаем на диапазон реальных данных.
+    - ENG существует только в TARGET и заполняется автотранслитом, если пусто.
+    """
     wb_src = load_workbook(io.BytesIO(source_bytes))
     wb_tgt = load_workbook(io.BytesIO(target_bytes))
 
@@ -545,24 +555,16 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
         else wb_tgt.create_sheet(TGT_SHEET_FOR_IMPORT)
     )
 
-    # --- настройки колонок ---
     ENG_COL = "ENG"
     UL_COL = "ЮЛ"
     BOOL_COLS = ["Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются"]
 
-    cols_base = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
+    # Базовые колонки для синка из SOURCE (без bool и без ENG)
+    cols_raw = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
+    if KEY_COLUMN_EXPORT not in cols_raw:
+        cols_raw = [KEY_COLUMN_EXPORT] + cols_raw
 
-    # ключ обязан быть в списке синкаемых
-    if KEY_COLUMN_EXPORT not in cols_base:
-        cols_base = [KEY_COLUMN_EXPORT] + cols_base
-
-    # cols = только то, что реально синкаем из SOURCE (без ENG)
-    cols = cols_base.copy()
-
-    # Булевые переносим в TARGET и синкаем (если есть в SOURCE), иначе будет 0
-    for b in BOOL_COLS:
-        if b not in cols:
-            cols.append(b)
+    cols_sync = [c for c in cols_raw if c not in BOOL_COLS and c != ENG_COL]
 
     src_map = header_index_map(ws_src)
     tgt_map = header_index_map(ws_tgt)
@@ -572,51 +574,45 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             f'Source sheet "{SRC_SHEET_FOR_EXPORT}": key column "{KEY_COLUMN_EXPORT}" not found'
         )
 
-    # --- ensure headers in TARGET: (cols + ENG), добавляем рядом с последним реальным заголовком ---
-    tgt_map = header_index_map(ws_tgt)
+    # --- Ensure headers in TARGET: (sync cols) + ENG + 3 bool cols ---
     h_last = last_header_col(ws_tgt)
 
     def ensure_header(name: str) -> None:
-        nonlocal h_last, tgt_map
+        nonlocal h_last
+        nonlocal tgt_map
         if name in tgt_map:
             return
         h_last += 1
         ws_tgt.cell(row=1, column=h_last).value = name
-        tgt_map[name] = h_last  # локально обновим
+        tgt_map[name] = h_last
 
-    # 1) сначала базовые колонки (без булевых)
-    for name in cols_base:
+    for name in cols_sync:
         ensure_header(name)
 
-    # 2) потом ENG (только в TARGET)
     ensure_header(ENG_COL)
 
-    # 3) потом 3 булевых
     for b in BOOL_COLS:
         ensure_header(b)
 
-
-    # refresh maps after header changes
+    # refresh after header changes
     tgt_map = header_index_map(ws_tgt)
 
-    # --- границы данных ---
+    # --- data boundaries ---
     src_last = get_last_data_row(ws_src, src_map[KEY_COLUMN_EXPORT], start_row=2)
     tgt_last = get_last_data_row(ws_tgt, tgt_map[KEY_COLUMN_EXPORT], start_row=2)
 
-    # --- читаем SOURCE в dict по ключу ---
+    # --- read SOURCE into dict (only sync cols) ---
     src_data: Dict[str, Dict[str, str]] = {}
     for r in range(2, src_last + 1):
         key = get_cell_str(ws_src, r, src_map[KEY_COLUMN_EXPORT])
         if not key:
             continue
-
         row_payload: Dict[str, str] = {}
-        for col in cols:
-            # если колонки нет в SOURCE — пишем пусто (не упадём)
+        for col in cols_sync:
             row_payload[col] = get_cell_str(ws_src, r, src_map[col]) if col in src_map else ""
         src_data[key] = row_payload
 
-    # --- существующие строки TARGET по ключу ---
+    # --- existing TARGET row map by key ---
     tgt_row_by_key: Dict[str, int] = {}
     if tgt_last >= 2:
         for r in range(2, tgt_last + 1):
@@ -624,69 +620,65 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             if key:
                 tgt_row_by_key[key] = r
 
-    # --- шаблон для стилей ---
+    # --- style template row (чтобы новые строки выглядели как существующие) ---
     template_row = 2 if ws_tgt.max_row >= 2 else 2
-    max_col = last_header_col(ws_tgt)  # важно: по реальным заголовкам, а не max_column
+    max_col = last_header_col(ws_tgt)  # только по реальным заголовкам
 
     updated = 0
     inserted = 0
     append_row = tgt_last + 1 if tgt_last >= 2 else 2
 
-    # --- upsert ---
+    # --- UPSERT ---
     for key, payload in src_data.items():
         if key in tgt_row_by_key:
             rr = tgt_row_by_key[key]
-            # обновляем только синкаемые cols (ENG не трогаем)
-            for col in cols:
+            # обновляем только "обычные" колонки (bool не трогаем)
+            for col in cols_sync:
                 ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
             updated += 1
         else:
             rr = append_row
             append_row += 1
 
-            # стиль строки
             if template_row >= 2 and template_row <= ws_tgt.max_row:
                 copy_row_style(ws_tgt, template_row, rr, max_col)
 
-            # записываем синкаемые колонки
-            for col in cols:
-                val = payload.get(col, "")
+            # пишем обычные колонки из SOURCE
+            for col in cols_sync:
+                ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
 
-                # для булевых по умолчанию ставим 0, если из SOURCE пусто
-                if col in BOOL_COLS and (val is None or str(val).strip() == ""):
-                    val = 0
+            # новые строки: bool колонки по умолчанию 0
+            for b in BOOL_COLS:
+                ws_tgt.cell(row=rr, column=tgt_map[b]).value = 0
 
-                ws_tgt.cell(row=rr, column=tgt_map[col]).value = val
+            # ENG — заполним ниже (автотранслит), тут оставляем пусто
+            ws_tgt.cell(row=rr, column=tgt_map[ENG_COL]).value = None
 
             inserted += 1
 
-    # --- normalize BOOL_COLS to 0/1 in TARGET + default 0 for empty ---
+    # --- Normalize bool cols in TARGET: не перезаписываем 0/1, но:
+    #     - пусто -> 0
+    #     - true/false -> 1/0
     key_col = tgt_map[KEY_COLUMN_EXPORT]
     tgt_last = get_last_data_row(ws_tgt, key_col, start_row=2)
     tgt_last = max(tgt_last, 2)
 
-    for name in BOOL_COLS:
-        if name not in tgt_map:
-            continue
-        c = tgt_map[name]
+    for b in BOOL_COLS:
+        c = tgt_map[b]
         for r in range(2, tgt_last + 1):
             v = ws_tgt.cell(row=r, column=c).value
-
-            # пусто -> ставим 0 (твой запрос “по умолчанию 0”)
             if is_empty_cell(v):
                 ws_tgt.cell(row=r, column=c).value = 0
                 continue
-
             norm = normalize_bool_to_01(v)
             if norm is None:
                 continue
             ws_tgt.cell(row=r, column=c).value = norm
 
-    # --- re-apply conditional formatting in TARGET ---
-    for name in BOOL_COLS:
-        if name not in tgt_map:
-            continue
-        c = tgt_map[name]
+    # --- Re-apply conditional formatting in TARGET for bool cols ---
+    # (добавляем правила; Яндекс/Excel должны их понять)
+    for b in BOOL_COLS:
+        c = tgt_map[b]
         letter = col_to_letter(c)
         apply_bool_cf(ws_tgt, letter, start_row=2, end_row=tgt_last)
 
@@ -719,7 +711,6 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     out = io.BytesIO()
     wb_tgt.save(out)
     return out.getvalue()
-
 
 
 # =======================
