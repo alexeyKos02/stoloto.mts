@@ -550,13 +550,16 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     UL_COL = "ЮЛ"
     BOOL_COLS = ["Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются"]
 
-    cols = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
+    cols_base = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
 
     # ключ обязан быть в списке синкаемых
-    if KEY_COLUMN_EXPORT not in cols:
-        cols = [KEY_COLUMN_EXPORT] + cols
+    if KEY_COLUMN_EXPORT not in cols_base:
+        cols_base = [KEY_COLUMN_EXPORT] + cols_base
 
-    # Булевые колонки хотим "перенести в таргет" => добавляем в список синкаемых
+    # cols = только то, что реально синкаем из SOURCE (без ENG)
+    cols = cols_base.copy()
+
+    # Булевые переносим в TARGET и синкаем (если есть в SOURCE), иначе будет 0
     for b in BOOL_COLS:
         if b not in cols:
             cols.append(b)
@@ -581,11 +584,17 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
         ws_tgt.cell(row=1, column=h_last).value = name
         tgt_map[name] = h_last  # локально обновим
 
-    for name in cols:
+    # 1) сначала базовые колонки (без булевых)
+    for name in cols_base:
         ensure_header(name)
 
-    # ENG существует только в TARGET (не тянем из SOURCE)
+    # 2) потом ENG (только в TARGET)
     ensure_header(ENG_COL)
+
+    # 3) потом 3 булевых
+    for b in BOOL_COLS:
+        ensure_header(b)
+
 
     # refresh maps after header changes
     tgt_map = header_index_map(ws_tgt)
