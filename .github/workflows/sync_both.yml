@@ -1,4 +1,4 @@
-name: Sync BOTH (INSIDE + SOURCE -> TARGET)
+name: Sync BOTH (inside + source<->target)
 
 on:
   workflow_dispatch:
@@ -16,15 +16,28 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Run sync (BOTH)
+      - name: Inside SOURCE
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
+        run: python sync_inside_source.py
+
+      - name: Wait a bit (avoid Disk lock)
+        run: sleep 3
+
+      - name: SOURCE -> TARGET (cert + tickets)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-          RUN_INSIDE_SOURCE: "1"
-          RUN_SYNC_TO_TARGET: "1"
-          SRC_SHEET_FOR_EXPORT: "СВОДНАЯ"
-          TGT_SHEET_FOR_IMPORT: "Лист1"
-          KEY_COLUMN_EXPORT: "ЮЛ"
-          COLUMNS_TO_SYNC_EXPORT: "ЮЛ|Terminal ID (Столото)|МТС ID"
-        run: python sync_xlsx.py
+        run: python sync_source_to_target.py
+
+      - name: Wait a bit (avoid Disk lock)
+        run: sleep 3
+
+      - name: TARGET -> SOURCE (mts cert)
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
+          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
+        run: python sync_target_to_source.py

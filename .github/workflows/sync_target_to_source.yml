@@ -1,0 +1,24 @@
+name: Sync TARGET -> SOURCE (mts cert)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run TARGET -> SOURCE
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
+          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
+        run: python sync_target_to_source.py
