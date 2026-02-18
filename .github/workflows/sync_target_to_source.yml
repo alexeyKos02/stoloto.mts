@@ -21,4 +21,4 @@ jobs:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-        run: python sync_target_to_source.py
+        run: python sync_mts_target_to_source.py
