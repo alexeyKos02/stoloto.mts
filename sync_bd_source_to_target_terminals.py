@@ -54,7 +54,7 @@ TARGET_COLS: List[str] = [
 BD_MTS_ALIASES = ["МТС ID", "МТСID", "MTS ID", "MTSID"]
 
 # Логика для "Добавлен сертификат" в TARGET по комментариям БД
-BD_COMMENTS_COL = "Комментарии (Столото)"
+BD_COMMENTS_COL = "Комментарии"
 CERT_OK_PHRASE = "есть все, но со стороны мтс нет сертификата"
 
 # Какие колонки считаем 0/1 и красим условным форматированием в TARGET
@@ -378,7 +378,7 @@ def sync_bd_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
         set_if_exists("Улица", "Улица")
         set_if_exists("Дом", "Дом")
         set_if_exists("Агент ID (Столото)", "Агент ID (Столото)")
-        set_if_exists("Комментарии (МТС)", "Комментарии (МТС)")
+        set_if_exists("Комментарии (МТС)", "Комментарии")
         set_if_exists("Комментарии (Столото)", "Комментарии (Столото)")
 
         # МТС ID
