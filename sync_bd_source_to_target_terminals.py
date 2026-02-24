@@ -293,39 +293,14 @@ def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> byt
             else:
                 payload[col] = ""  # колонки нет в БД => пусто
 
-    # ===============================
-    # УСЛОВИЕ ДЛЯ "Добавлен сертификат"
-    # ===============================
-
-    comment_text = ""
-
-    if src_idx["Комментарии"]:
-        comment_text = get_cell_str(ws_src, r, src_idx["Комментарии"]).strip().lower()
-
-    # Если комментариев нет
-    if comment_text == "":
-        payload["Добавлен сертификат"] = 1
-
-    # Если фраза строго совпадает
-    elif comment_text == "есть все, но со стороны мтс нет сертификата":
-        payload["Добавлен сертификат"] = 1
-
-    # Во всех остальных случаях
-    else:
-        payload["Добавлен сертификат"] = 0
-
-    # Остальные булевые поля просто нормализуем
-    for b in BOOL_COLS:
-        if b == "Добавлен сертификат":
-            continue
-
-        v = payload.get(b, "")
-        if is_empty(v):
-            payload[b] = 0
-        else:
-            n = normalize_bool_to_01(v)
-            payload[b] = 0 if n is None else n
-
+        # bool defaults
+        for b in BOOL_COLS:
+            v = payload.get(b, "")
+            if is_empty(v):
+                payload[b] = 0
+            else:
+                n = normalize_bool_to_01(v)
+                payload[b] = 0 if n is None else n
 
         src_rows[key] = payload
 
