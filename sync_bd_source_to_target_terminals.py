@@ -274,68 +274,69 @@ def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> byt
     src_last = get_last_data_row(ws_src, key_col_src, start_row=2)
 
     src_rows: Dict[str, Dict[str, object]] = {}
-    
-    # --- read SOURCE (БД) into dict by key (Agent ID if exists else ЮЛ) ---
-    # Правило для поля "Добавлен сертификат":
-    # - если в БД в колонке "Комментарии" пусто ИЛИ ровно фраза
-    #   "есть все, но со стороны мтс нет сертификата" (без учета регистра/пробелов),
-    #   то ставим 1; иначе 0.
-    comment_col = alias_pick(src_map, ["Комментарии", "Комментарий", "Коммент", "Comments"])
-    phrase = "есть все, но со стороны мтс нет сертификата"
-
-    src_rows: Dict[str, Dict[str, str]] = {}
-
     for r in range(2, src_last + 1):
-        ul = get_cell_str(ws_src, r, src_idx.get("ЮЛ") or 0) if src_idx.get("ЮЛ") else ""
-        agent = (
-            get_cell_str(ws_src, r, src_idx.get("Агент ID (Столото)") or 0)
-            if src_idx.get("Агент ID (Столото)")
-            else ""
-        )
-        if not ul and not agent:
+        agent = get_cell_str(ws_src, r, src_idx["Агент ID (Столото)"]) if src_idx["Агент ID (Столото)"] else ""
+        ul = get_cell_str(ws_src, r, src_idx["ЮЛ"]) if src_idx["ЮЛ"] else ""
+        terminal = get_cell_str(ws_src, r, src_idx["Terminal ID (Столото)"]) if src_idx["Terminal ID (Столото)"] else ""
+
+        # если совсем пустая строка — пропускаем
+        if not agent and not ul:
             continue
 
-        key = agent or ul
+        key = build_key(agent or ul, terminal)  # если агента нет, используем ЮЛ как "ключ-подстраховку"
+        payload: Dict[str, object] = {}
 
-        bd_comment = get_cell_str(ws_src, r, comment_col) if comment_col else ""
-        bd_comment_norm = bd_comment.strip().lower()
-
-        cert_value = 1 if (bd_comment_norm == "" or bd_comment_norm == phrase) else 0
-
-        payload: Dict[str, str] = {}
         for col in TARGET_COLS:
-            # special: derived fields / mapping
-            if col == "Добавлен сертификат":
-                payload[col] = cert_value
-                continue
+            si = src_idx.get(col)
+            if si:
+                payload[col] = ws_src.cell(row=r, column=si).value
+            else:
+                payload[col] = ""  # колонки нет в БД => пусто
 
-            if col == "Комментарии (Столото)":
-                payload[col] = bd_comment
-                continue
+    # ===============================
+    # УСЛОВИЕ ДЛЯ "Добавлен сертификат"
+    # ===============================
 
-            # if these columns exist in BD - take; otherwise empty
-            c = src_idx.get(col)
-            if not c:
-                # если колонки нет в БД —
-                # "Добавлен сертификат (МТС)" и "Комментарии (МТС)" считаем ручными в TARGET и не затираем при апдейте
-                if col in ("Добавлен сертификат (МТС)", "Комментарии (МТС)"):
-                    payload[col] = KEEP_MARKER
-                else:
-                    payload[col] = ""
-                continue
+    comment_text = ""
 
-            raw = ws_src.cell(row=r, column=c).value
-            if col in ("Добавлен сертификат (МТС)",):
-                norm = normalize_bool_to_01(raw)
-                payload[col] = "" if norm is None else norm
-                continue
+    if src_idx["Комментарии"]:
+        comment_text = get_cell_str(ws_src, r, src_idx["Комментарии"]).strip().lower()
 
-            val = "" if raw is None else str(raw).strip()
-            if col == "МТС ID":
-                val = normalize_mts_id(val)
-            payload[col] = val
+    # Если комментариев нет
+    if comment_text == "":
+        payload["Добавлен сертификат"] = 1
+
+    # Если фраза строго совпадает
+    elif comment_text == "есть все, но со стороны мтс нет сертификата":
+        payload["Добавлен сертификат"] = 1
+
+    # Во всех остальных случаях
+    else:
+        payload["Добавлен сертификат"] = 0
+
+    # Остальные булевые поля просто нормализуем
+    for b in BOOL_COLS:
+        if b == "Добавлен сертификат":
+            continue
+
+        v = payload.get(b, "")
+        if is_empty(v):
+            payload[b] = 0
+        else:
+            n = normalize_bool_to_01(v)
+            payload[b] = 0 if n is None else n
+
 
         src_rows[key] = payload
+
+    # map TARGET existing rows by key
+    agent_col_t = tgt_map.get(KEY_AGENT) or tgt_map.get("ЮЛ")
+    terminal_col_t = tgt_map.get(KEY_TERMINAL)
+
+    if not agent_col_t:
+        raise RuntimeError('TARGET: не нашёл колонку "Агент ID (Столото)" и даже "ЮЛ"')
+
+    tgt_last = get_last_data_row(ws_tgt, agent_col_t, start_row=2)
 
     tgt_row_by_key: Dict[str, int] = {}
     for r in range(2, tgt_last + 1):
@@ -354,20 +355,13 @@ def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> byt
         if key in tgt_row_by_key:
             rr = tgt_row_by_key[key]
             for col in TARGET_COLS:
-                val = payload.get(col, "")
-                if val == KEEP_MARKER:
-                    continue
-                ws_tgt.cell(row=rr, column=tgt_map[col]).value = val
+                ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
             updated += 1
         else:
             rr = append_row
             append_row += 1
             for col in TARGET_COLS:
-                val = payload.get(col, "")
-                if val == KEEP_MARKER:
-                    # на вставке: пусто/0 по умолчанию
-                    val = 0 if col in BOOL_COLS else ""
-                ws_tgt.cell(row=rr, column=tgt_map[col]).value = val
+                ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
             inserted += 1
 
     # normalize + CF reapply on real data range
