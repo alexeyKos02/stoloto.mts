@@ -22,5 +22,5 @@ jobs:
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }} # не используем, но НЕ УДАЛЯТЬ
           RUN_INSIDE_SOURCE: "1"
-          RUN_SYNC_TO_TARGET: "0"
+          RUN_SYNC_TO_TARGET: "1"
         run: python sync_xlsx.py
