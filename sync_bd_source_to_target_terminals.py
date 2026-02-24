@@ -378,8 +378,8 @@ def sync_bd_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
         set_if_exists("Улица", "Улица")
         set_if_exists("Дом", "Дом")
         set_if_exists("Агент ID (Столото)", "Агент ID (Столото)")
-        set_if_exists("Комментарии (МТС)", "Комментарии")
-        set_if_exists("Комментарии (Столото)", "Комментарии (Столото)")
+        set_if_exists("Комментарии (МТС)", "Комментарии (МТС)")
+        set_if_exists("Комментарии (Столото)", "Комментарии")
 
         # МТС ID
         if mts_col_name:
