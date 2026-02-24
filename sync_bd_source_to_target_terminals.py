@@ -293,7 +293,7 @@ def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> byt
             else:
                 payload[col] = ""  # колонки нет в БД => пусто
 
-        # bool defaults
+        # --- normalize BOOL_COLS (в т.ч. default 0) ---
         for b in BOOL_COLS:
             v = payload.get(b, "")
             if is_empty(v):
@@ -302,7 +302,25 @@ def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> byt
                 n = normalize_bool_to_01(v)
                 payload[b] = 0 if n is None else n
 
+        # --- NEW RULE: calc "Добавлен сертификат" from COMMENTS + MTS cert ---
+        # источник: БД "Комментарии" + "Добавлен сертификат (МТС)"
+        comments_raw = payload.get("Комментарии", "")
+        comments = "" if comments_raw is None else str(comments_raw).strip().lower()
+
+        mts_cert = payload.get("Добавлен сертификат (МТС)", 0)
+        mts_cert01 = normalize_bool_to_01(mts_cert)
+        if mts_cert01 is None:
+            mts_cert01 = 0
+
+        # условие:
+        # (комментов нет ИЛИ есть фраза "есть все") И (МТС сертификата нет)
+        if (comments == "" or "есть все" in comments) and mts_cert01 == 0:
+            payload["Добавлен сертификат"] = 1
+        else:
+            payload["Добавлен сертификат"] = 0
+
         src_rows[key] = payload
+
 
     # map TARGET existing rows by key
     agent_col_t = tgt_map.get(KEY_AGENT) or tgt_map.get("ЮЛ")
