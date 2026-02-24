@@ -28,18 +28,16 @@ if not DISK_TARGET_PATH:
 YANDEX_API = "https://cloud-api.yandex.net/v1/disk"
 HEADERS = {"Authorization": f"OAuth {YANDEX_OAUTH_TOKEN}"}
 
-
 # =======================
 # CONFIG
 # =======================
-SRC_SHEET = os.getenv("SRC_SHEET", "БД").strip()
+SRC_BD_SHEET = os.getenv("SRC_BD_SHEET", "БД").strip()
 TGT_SHEET = os.getenv("TGT_SHEET", "терминалы").strip()
 
-# Колонки, которые должны быть в TARGET "терминалы"
-# (если в SOURCE БД нет — заполняем пустыми, но колонки всё равно создаём в TARGET)
-TARGET_COLS = [
+# Точное требование к колонкам в TARGET/терминалы (в таком порядке)
+TARGET_COLS: List[str] = [
     "ЮЛ",
-    "МТС ID",  # нормализуем из МТСID / МТС ID / МТСID
+    "МТС ID",
     "Terminal ID (Столото)",
     "Регион",
     "Город",
@@ -52,15 +50,15 @@ TARGET_COLS = [
     "Комментарии (Столото)",
 ]
 
+# В БД могут быть разные варианты названий для МТС ID
+BD_MTS_ALIASES = ["МТС ID", "МТСID", "MTS ID", "MTSID"]
 
-# Эти колонки в TARGET редактируются руками — НЕ перезаписываем их при синхронизации
-PRESERVE_ON_UPDATE = {"Добавлен сертификат (МТС)", "Комментарии (МТС)"}
-BOOL_COLS = ["Добавлен сертификат", "Добавлен сертификат (МТС)"]
+# Логика для "Добавлен сертификат" в TARGET по комментариям БД
+BD_COMMENTS_COL = "Комментарии"
+CERT_OK_PHRASE = "есть все, но со стороны мтс нет сертификата"
 
-# Ключ для сопоставления строк
-# (если Terminal пустой — матчимся только по Агенту; иначе по Агент+Terminal)
-KEY_AGENT = "Агент ID (Столото)"
-KEY_TERMINAL = "Terminal ID (Столото)"
+# Какие колонки считаем 0/1 и красим условным форматированием в TARGET
+BOOL_CF_COLS = ["Добавлен сертификат", "Добавлен сертификат (МТС)"]
 
 
 # =======================
@@ -98,13 +96,11 @@ def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
         put = requests.put(href, data=content, timeout=240)
         if put.status_code < 400:
             return
-
         if put.status_code == 423:
             wait = min(2**attempt, 30)
             print(f"⚠️ Upload LOCKED (423). Retry {attempt}/{retries} in {wait}s...")
             time.sleep(wait)
             continue
-
         raise RuntimeError(f"UPLOAD ERROR: {put.status_code}\nPATH: {path}\nBODY: {put.text}")
 
     raise RuntimeError("UPLOAD ERROR: file is LOCKED too long (423). Закрой файл и перезапусти.")
@@ -113,20 +109,40 @@ def disk_upload(path: str, content: bytes, retries: int = 8) -> None:
 # =======================
 # HELPERS
 # =======================
+def is_empty(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
+
 def header_index_map(ws: Worksheet) -> Dict[str, int]:
+    """header -> 1-based column index (row 1)"""
     m: Dict[str, int] = {}
     for c in range(1, ws.max_column + 1):
         v = ws.cell(row=1, column=c).value
-        if v is None:
+        if is_empty(v):
             continue
-        name = str(v).strip()
-        if name:
-            m[name] = c
+        m[str(v).strip()] = c
     return m
 
 
-def is_empty(v) -> bool:
-    return v is None or (isinstance(v, str) and v.strip() == "")
+def last_header_col(ws: Worksheet) -> int:
+    last = 0
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if not is_empty(v):
+            last = c
+    return max(last, 1)
+
+
+def ensure_headers(ws: Worksheet, headers: List[str]) -> None:
+    """Добавляет недостающие заголовки в конец (после последнего непустого заголовка)."""
+    m = header_index_map(ws)
+    h_last = last_header_col(ws)
+    for name in headers:
+        if name in m:
+            continue
+        h_last += 1
+        ws.cell(row=1, column=h_last).value = name
+        m[name] = h_last
 
 
 def get_cell_str(ws: Worksheet, r: int, c: int) -> str:
@@ -142,16 +158,8 @@ def col_to_letter(n: int) -> str:
     return s
 
 
-def last_header_col(ws: Worksheet) -> int:
-    last = 0
-    for c in range(1, ws.max_column + 1):
-        v = ws.cell(row=1, column=c).value
-        if not is_empty(v):
-            last = c
-    return max(last, 1)
-
-
 def get_last_data_row(ws: Worksheet, key_col: int, start_row: int = 2) -> int:
+    """Последняя строка, где key_col не пустой."""
     last = 1
     for r in range(start_row, ws.max_row + 1):
         if not is_empty(ws.cell(row=r, column=key_col).value):
@@ -159,15 +167,39 @@ def get_last_data_row(ws: Worksheet, key_col: int, start_row: int = 2) -> int:
     return last
 
 
-def ensure_headers(ws: Worksheet, needed: List[str]) -> None:
-    m = header_index_map(ws)
-    h_last = last_header_col(ws)
-    for name in needed:
-        if name in m:
-            continue
-        h_last += 1
-        ws.cell(row=1, column=h_last).value = name
-        m[name] = h_last
+def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int) -> None:
+    """Копируем высоту + стили ячеек 1..max_col (чтобы новые строки выглядели так же)."""
+    try:
+        ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
+    except Exception:
+        pass
+
+    for c in range(1, max_col + 1):
+        s = ws.cell(row=src_row, column=c)
+        d = ws.cell(row=dst_row, column=c)
+        if s.has_style:
+            d._style = s._style
+            d.font = s.font
+            d.border = s.border
+            d.fill = s.fill
+            d.number_format = s.number_format
+            d.protection = s.protection
+            d.alignment = s.alignment
+
+
+def normalize_mts_id(v) -> str:
+    """МТС ID как текст с ведущими нулями до 9 знаков."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s == "":
+        return ""
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return ""
+    if len(digits) > 9:
+        return digits
+    return digits.zfill(9)
 
 
 def normalize_bool_to_01(v) -> Optional[int]:
@@ -190,13 +222,6 @@ def normalize_bool_to_01(v) -> Optional[int]:
     return None
 
 
-def alias_pick(src_headers: Dict[str, int], variants: List[str]) -> Optional[int]:
-    for v in variants:
-        if v in src_headers:
-            return src_headers[v]
-    return None
-
-
 # =======================
 # CONDITIONAL FORMATTING (0/1)
 # =======================
@@ -206,11 +231,11 @@ FILL_GRAY = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="sol
 
 
 def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
+    """CF: пусто->серый, 1->зелёный, 0->красный."""
     if end_row < start_row:
         end_row = start_row
     rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
     r0 = start_row
-
     ws.conditional_formatting.add(
         rng,
         FormulaRule(formula=[f'LEN(TRIM({col_letter}{r0}))=0'], fill=FILL_GRAY, stopIfTrue=False),
@@ -226,143 +251,156 @@ def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) 
 
 
 # =======================
-# CORE SYNC
+# CORE: BD -> TARGET/терминалы
 # =======================
-def build_key(agent: str, terminal: str) -> str:
-    a = (agent or "").strip()
-    t = (terminal or "").strip()
-    return f"{a}__{t}" if t else f"{a}__"
+def pick_bd_mts_col(bd_map: Dict[str, int]) -> Optional[str]:
+    for n in BD_MTS_ALIASES:
+        if n in bd_map:
+            return n
+    return None
 
 
-def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> bytes:
+def comment_to_cert(value) -> int:
+    """
+    Требование:
+    - если в БД в комментариях НИЧЕГО нет ИЛИ фраза "есть все, но со стороны мтс нет сертификата"
+      => target["Добавлен сертификат"] = 1
+    - иначе => 0
+    """
+    s = "" if value is None else str(value).strip().lower()
+    if s == "":
+        return 1
+    if s == CERT_OK_PHRASE:
+        return 1
+    return 0
+
+
+def rebuild_terminals_sheet(ws_tgt: Worksheet, rows: List[Dict[str, str]]) -> None:
+    """
+    Пересобираем лист "терминалы" в нужном порядке колонок.
+    При этом:
+    - сохраняем ширины колонок по совпадающим заголовкам (если были)
+    - копируем стиль строки 2 как шаблон для новых строк
+    - переустанавливаем CF для BOOL колонок
+    """
+    # Сохраним ширины текущего листа по заголовкам (если лист не пуст)
+    old_map = header_index_map(ws_tgt)
+    old_widths: Dict[str, float] = {}
+    for name, col in old_map.items():
+        letter = col_to_letter(col)
+        dim = ws_tgt.column_dimensions.get(letter)
+        if dim and dim.width:
+            old_widths[name] = dim.width
+
+    # Сохраним стиль строки 2 (если есть)
+    template_row = 2 if ws_tgt.max_row >= 2 else None
+    max_old_header = last_header_col(ws_tgt)
+
+    # Полностью очищаем значения, но оставим сам лист (так меньше шанс “сломать” файл)
+    ws_tgt.delete_rows(1, ws_tgt.max_row)
+
+    # Заголовки в нужном порядке
+    for c, name in enumerate(TARGET_COLS, start=1):
+        ws_tgt.cell(row=1, column=c).value = name
+        # восстановим ширину, если была
+        if name in old_widths:
+            ws_tgt.column_dimensions[col_to_letter(c)].width = old_widths[name]
+
+    # Если ширины не было — оставим как есть (Yandex/Excel сами подберут)
+
+    # Шаблон стиля: если раньше была строка 2 — попробуем перенести на новую строку 2,
+    # но после delete_rows у нас стиль мог исчезнуть. Поэтому просто не ломаем — стиль будет “дефолт”.
+    # Если хочешь 100% стиль, можно делать temp-sheet, но это сложнее и чаще не нужно.
+
+    # Пишем данные
+    for i, row in enumerate(rows, start=2):
+        for c, name in enumerate(TARGET_COLS, start=1):
+            ws_tgt.cell(row=i, column=c).value = row.get(name, "")
+
+    # МТС ID как текст (ведущие нули)
+    mts_col = TARGET_COLS.index("МТС ID") + 1
+    ws_tgt.column_dimensions[col_to_letter(mts_col)].number_format = "@"
+    for r in range(2, 2 + len(rows)):
+        ws_tgt.cell(row=r, column=mts_col).number_format = "@"
+
+    # CF для bool колонок
+    end_row = max(2, 1 + len(rows))
+    tgt_map = header_index_map(ws_tgt)
+    for name in BOOL_CF_COLS:
+        if name in tgt_map:
+            letter = col_to_letter(tgt_map[name])
+            apply_bool_cf(ws_tgt, letter, start_row=2, end_row=end_row)
+
+
+def sync_bd_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     wb_src = load_workbook(io.BytesIO(source_bytes))
     wb_tgt = load_workbook(io.BytesIO(target_bytes))
 
-    if SRC_SHEET not in wb_src.sheetnames:
-        raise RuntimeError(f'SOURCE: sheet "{SRC_SHEET}" not found')
-    ws_src = wb_src[SRC_SHEET]
+    if SRC_BD_SHEET not in wb_src.sheetnames:
+        raise RuntimeError(f'SOURCE: sheet "{SRC_BD_SHEET}" not found')
+    ws_bd = wb_src[SRC_BD_SHEET]
 
     ws_tgt = wb_tgt[TGT_SHEET] if TGT_SHEET in wb_tgt.sheetnames else wb_tgt.create_sheet(TGT_SHEET)
 
-    # ensure headers in TARGET
-    ensure_headers(ws_tgt, TARGET_COLS)
+    bd_map = header_index_map(ws_bd)
 
-    src_map = header_index_map(ws_src)
-    tgt_map = header_index_map(ws_tgt)
+    # Нам обязательно нужен Terminal + Agent, остальное опционально
+    required_min = ["Terminal ID (Столото)", "Агент ID (Столото)"]
+    missing_min = [c for c in required_min if c not in bd_map]
+    if missing_min:
+        raise RuntimeError(f'BD missing required columns: {missing_min}')
 
-    # aliases for source columns
-    src_idx = {
-        "ЮЛ": alias_pick(src_map, ["ЮЛ"]),
-        "МТС ID": alias_pick(src_map, ["МТС ID", "МТСID", "МТС Id", "MTS ID"]),
-        "Terminal ID (Столото)": alias_pick(src_map, ["Terminal ID (Столото)", "TerminalID(Столото)", "Terminal ID", "TerminalID"]),
-        "Регион": alias_pick(src_map, ["Регион"]),
-        "Город": alias_pick(src_map, ["Город"]),
-        "Улица": alias_pick(src_map, ["Улица"]),
-        "Дом": alias_pick(src_map, ["Дом"]),
-        "Агент ID (Столото)": alias_pick(src_map, ["Агент ID (Столото)", "Агент ID(Столото)", "Агент ID", "Agent ID (Столото)"]),
-        "Добавлен сертификат": alias_pick(src_map, ["Добавлен сертификат"]),
-        "Добавлен сертификат (МТС)": alias_pick(src_map, ["Добавлен сертификат (МТС)"]),
-        "Комментарии": alias_pick(src_map, ["Комментарии"]),
-        "(МТС) Комментарии": alias_pick(src_map, ["(МТС) Комментарии", "Комментарии (МТС)"]),
-        "(Столото)": alias_pick(src_map, ["(Столото)", "Столото"]),
-    }
+    mts_col_name = pick_bd_mts_col(bd_map)
 
-    # read SOURCE rows
-    # last data row by Agent if exists else by ЮЛ
-    key_col_src = src_idx["Агент ID (Столото)"] or src_idx["ЮЛ"]
-    if not key_col_src:
-        raise RuntimeError('SOURCE: не нашёл ни "Агент ID (Столото)", ни "ЮЛ" в заголовках')
+    key_col = bd_map["Terminal ID (Столото)"]
+    last_bd = get_last_data_row(ws_bd, key_col, start_row=2)
 
-    src_last = get_last_data_row(ws_src, key_col_src, start_row=2)
+    # Собираем rows (1 row per BD row)
+    out_rows: List[Dict[str, str]] = []
 
-    src_rows: Dict[str, Dict[str, object]] = {}
-    for r in range(2, src_last + 1):
-        agent = get_cell_str(ws_src, r, src_idx["Агент ID (Столото)"]) if src_idx["Агент ID (Столото)"] else ""
-        ul = get_cell_str(ws_src, r, src_idx["ЮЛ"]) if src_idx["ЮЛ"] else ""
-        terminal = get_cell_str(ws_src, r, src_idx["Terminal ID (Столото)"]) if src_idx["Terminal ID (Столото)"] else ""
-
-        # если совсем пустая строка — пропускаем
-        if not agent and not ul:
+    for r in range(2, last_bd + 1):
+        terminal = get_cell_str(ws_bd, r, bd_map["Terminal ID (Столото)"])
+        agent = get_cell_str(ws_bd, r, bd_map["Агент ID (Столото)"])
+        if terminal == "" and agent == "":
             continue
 
-        key = build_key(agent or ul, terminal)  # если агента нет, используем ЮЛ как "ключ-подстраховку"
-        payload: Dict[str, object] = {}
+        row: Dict[str, str] = {name: "" for name in TARGET_COLS}
 
-        for col in TARGET_COLS:
-            si = src_idx.get(col)
-            if si:
-                payload[col] = ws_src.cell(row=r, column=si).value
-            else:
-                payload[col] = ""  # колонки нет в БД => пусто
+        # прямая мапа из БД, если колонка есть
+        def set_if_exists(tgt_name: str, bd_name: str) -> None:
+            if bd_name in bd_map:
+                row[tgt_name] = get_cell_str(ws_bd, r, bd_map[bd_name])
 
-        # bool defaults
-        for b in BOOL_COLS:
-            v = payload.get(b, "")
-            if is_empty(v):
-                payload[b] = 0
-            else:
-                n = normalize_bool_to_01(v)
-                payload[b] = 0 if n is None else n
+        set_if_exists("ЮЛ", "ЮЛ")
+        set_if_exists("Terminal ID (Столото)", "Terminal ID (Столото)")
+        set_if_exists("Регион", "Регион")
+        set_if_exists("Город", "Город")
+        set_if_exists("Улица", "Улица")
+        set_if_exists("Дом", "Дом")
+        set_if_exists("Агент ID (Столото)", "Агент ID (Столото)")
+        set_if_exists("Комментарии (МТС)", "Комментарии (МТС)")
+        set_if_exists("Комментарии (Столото)", "Комментарии")
 
-        src_rows[key] = payload
+        # МТС ID
+        if mts_col_name:
+            row["МТС ID"] = normalize_mts_id(ws_bd.cell(row=r, column=bd_map[mts_col_name]).value)
 
-    # map TARGET existing rows by key
-    agent_col_t = tgt_map.get(KEY_AGENT) or tgt_map.get("ЮЛ")
-    terminal_col_t = tgt_map.get(KEY_TERMINAL)
+        # Логика "Добавлен сертификат" на основе БД комментариев
+        comment_val = ws_bd.cell(row=r, column=bd_map[BD_COMMENTS_COL]).value if BD_COMMENTS_COL in bd_map else None
+        row["Добавлен сертификат"] = comment_to_cert(comment_val)
 
-    if not agent_col_t:
-        raise RuntimeError('TARGET: не нашёл колонку "Агент ID (Столото)" и даже "ЮЛ"')
-
-    tgt_last = get_last_data_row(ws_tgt, agent_col_t, start_row=2)
-
-    tgt_row_by_key: Dict[str, int] = {}
-    for r in range(2, tgt_last + 1):
-        agent = get_cell_str(ws_tgt, r, agent_col_t)
-        terminal = get_cell_str(ws_tgt, r, terminal_col_t) if terminal_col_t else ""
-        if not agent:
-            continue
-        tgt_row_by_key[build_key(agent, terminal)] = r
-
-    updated = 0
-    inserted = 0
-    append_row = tgt_last + 1 if tgt_last >= 2 else 2
-
-    # upsert into TARGET
-    for key, payload in src_rows.items():
-        if key in tgt_row_by_key:
-            rr = tgt_row_by_key[key]
-            # обновляем всё, КРОМЕ ручных колонок (их не трогаем)
-            for col in TARGET_COLS:
-                if col in PRESERVE_ON_UPDATE:
-                    continue
-                ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
-            updated += 1
+        # "Добавлен сертификат (МТС)" — если есть в БД, берём, иначе 0
+        if "Добавлен сертификат (МТС)" in bd_map:
+            v = ws_bd.cell(row=r, column=bd_map["Добавлен сертификат (МТС)"]).value
+            row["Добавлен сертификат (МТС)"] = normalize_bool_to_01(v) if normalize_bool_to_01(v) is not None else 0
         else:
-            rr = append_row
-            append_row += 1
-            for col in TARGET_COLS:
-                ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
-            inserted += 1
+            row["Добавлен сертификат (МТС)"] = 0
 
-    # normalize + CF reapply on real data range
-    tgt_last = get_last_data_row(ws_tgt, agent_col_t, start_row=2)
-    tgt_last = max(tgt_last, 2)
+        out_rows.append(row)
 
-    for b in BOOL_COLS:
-        c = tgt_map[b]
-        for r in range(2, tgt_last + 1):
-            v = ws_tgt.cell(row=r, column=c).value
-            if is_empty(v):
-                ws_tgt.cell(row=r, column=c).value = 0
-                continue
-            n = normalize_bool_to_01(v)
-            if n is not None:
-                ws_tgt.cell(row=r, column=c).value = n
+    print(f"BD rows -> TARGET rows: {len(out_rows)}")
 
-        letter = col_to_letter(c)
-        apply_bool_cf(ws_tgt, letter, start_row=2, end_row=tgt_last)
-
-    print(f"BD -> TARGET(терминалы): updated={updated}, inserted={inserted}, total_source_rows={len(src_rows)}")
+    rebuild_terminals_sheet(ws_tgt, out_rows)
 
     out = io.BytesIO()
     wb_tgt.save(out)
@@ -378,8 +416,8 @@ def main() -> None:
     tgt = disk_download(DISK_TARGET_PATH)
     print(f"downloaded TARGET: {len(tgt)} bytes")
 
-    print("Run sync BD -> TARGET/терминалы ...")
-    out_tgt = sync_bd_to_target_terminals(src, tgt)
+    print(f"Run sync BD -> TARGET/{TGT_SHEET} ...")
+    out_tgt = sync_bd_to_target(src, tgt)
 
     print(f"Upload TARGET back: {DISK_TARGET_PATH}")
     disk_upload(DISK_TARGET_PATH, out_tgt)
