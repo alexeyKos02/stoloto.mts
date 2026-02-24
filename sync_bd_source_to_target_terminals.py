@@ -330,6 +330,11 @@ def sync_bd_to_target_terminals(source_bytes: bytes, target_bytes: bytes) -> byt
                 payload[col] = "" if norm is None else norm
                 continue
 
+            val = "" if raw is None else str(raw).strip()
+            if col == "МТС ID":
+                val = normalize_mts_id(val)
+            payload[col] = val
+
         src_rows[key] = payload
 
     tgt_row_by_key: Dict[str, int] = {}
