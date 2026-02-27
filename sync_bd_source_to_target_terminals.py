@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import PatternFill
+from copy import copy
 
 
 # =======================
@@ -152,14 +153,57 @@ def last_header_col(ws: Worksheet) -> int:
     return max(last, 1)
 
 
+def col_to_letter(n: int) -> str:
+    s = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def copy_cell_style(src_cell, dst_cell) -> None:
+    """
+    Копируем стиль через copy(), чтобы не было общих ссылок на стиль (StyleProxy).
+    Иначе при сохранении может "плыть" оформление.
+    """
+    if not src_cell.has_style:
+        return
+
+    dst_cell._style = copy(src_cell._style)
+    dst_cell.font = copy(src_cell.font)
+    dst_cell.border = copy(src_cell.border)
+    dst_cell.fill = copy(src_cell.fill)
+    dst_cell.number_format = src_cell.number_format
+    dst_cell.protection = copy(src_cell.protection)
+    dst_cell.alignment = copy(src_cell.alignment)
+
+
 def ensure_headers(ws: Worksheet, headers: List[str]) -> None:
     m = header_index_map(ws)
     col = last_header_col(ws)
+
+    # шаблон: последняя реальная колонка заголовков
+    template_col = col if col >= 1 else 1
+    template_header = ws.cell(row=1, column=template_col)
+    template_letter = col_to_letter(template_col)
+    template_width = ws.column_dimensions[template_letter].width
+
     for h in headers:
         if h in m:
             continue
         col += 1
-        ws.cell(row=1, column=col).value = h
+
+        dst_header = ws.cell(row=1, column=col)
+        dst_header.value = h
+
+        # стиль заголовка
+        copy_cell_style(template_header, dst_header)
+
+        # ширина колонки
+        new_letter = col_to_letter(col)
+        if template_width is not None:
+            ws.column_dimensions[new_letter].width = template_width
+
         m[h] = col
 
 
@@ -223,14 +267,7 @@ def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int) -> N
     for c in range(1, max_col + 1):
         s = ws.cell(row=src_row, column=c)
         d = ws.cell(row=dst_row, column=c)
-        if s.has_style:
-            d._style = s._style
-            d.font = s.font
-            d.border = s.border
-            d.fill = s.fill
-            d.number_format = s.number_format
-            d.protection = s.protection
-            d.alignment = s.alignment
+        copy_cell_style(s, d)
 
 
 # =======================
@@ -239,14 +276,6 @@ def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int) -> N
 FILL_GREEN = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 FILL_RED = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 FILL_GRAY = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
-
-
-def col_to_letter(n: int) -> str:
-    s = ""
-    while n:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
 
 
 def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
@@ -260,6 +289,7 @@ def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) 
         end_row = start_row
     rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
     r0 = start_row
+
 
     ws.conditional_formatting.add(
         rng,
