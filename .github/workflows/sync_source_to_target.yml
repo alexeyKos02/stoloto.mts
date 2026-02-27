@@ -1,0 +1,30 @@
+name: Sync SOURCE -> TARGET (mts cert)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run sync (SOURCE -> TARGET)
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
+          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
+          RUN_INSIDE_SOURCE: "0"
+          RUN_SYNC_TO_TARGET: "1"
+          SRC_SHEET_FOR_EXPORT: "СВОДНАЯ"
+          TGT_SHEET_FOR_IMPORT: "Лист1"
+          KEY_COLUMN_EXPORT: "ЮЛ"
+          COLUMNS_TO_SYNC_EXPORT: "ЮЛ|Terminal ID (Столото)|МТС ID"
+        run: python sync_bools_source_to_target.py
