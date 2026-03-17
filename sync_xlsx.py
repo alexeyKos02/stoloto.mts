@@ -34,7 +34,7 @@ TGT_SHEET_FOR_IMPORT = os.getenv("TGT_SHEET_FOR_IMPORT", "Лист1").strip()
 KEY_COLUMN_EXPORT = os.getenv("KEY_COLUMN_EXPORT", "ЮЛ").strip()
 COLUMNS_TO_SYNC_EXPORT = os.getenv(
     "COLUMNS_TO_SYNC_EXPORT",
-    "ЮЛ|Terminal ID (Столото)|МТС ID|Добавлен сертификат|Добавлен сертификат (МТС)|Билеты продаются",
+    "ЮЛ|Terminal ID (Столото)|Добавлен сертификат|Билеты продаются",
 ).strip()
 
 
@@ -71,6 +71,10 @@ BD_REQUIRED = [
     "GUID",
     "Ответственный ССПС",
 ]
+
+# Колонка с комментариями в БД для вычисления "Добавлен сертификат"
+BD_CERT_COMMENT_COL = "Комментарии"
+CERT_OK_PHRASE = "есть все, но со стороны мтс нет сертификата"
 
 
 # =======================
@@ -364,18 +368,34 @@ def ensure_svod_columns(ws_svod: Worksheet) -> None:
 
 
 # =======================
-# DELETE agents removed from BD
+# CERT from BD comment
 # =======================
-def delete_missing_agents(ws_svod: Worksheet, sv_map: Dict[str, int], agents_in_bd: Set[str]) -> int:
-    agent_col = sv_map["Агент ID (Столото)"]
-    last_data = get_last_data_row(ws_svod, agent_col, start_row=2)
+def cert_value_from_bd_comment(comment_value) -> int:
+    """
+    Логика вычисления "Добавлен сертификат" по комментарию из БД:
+    - пустой комментарий → 1
+    - "есть все, но со стороны мтс нет сертификата" → 1
+    - всё остальное → 0
+    """
+    s = "" if comment_value is None else str(comment_value).strip().lower()
+    if s == "" or s == CERT_OK_PHRASE:
+        return 1
+    return 0
+
+
+# =======================
+# DELETE ЮЛ removed from BD
+# =======================
+def delete_missing_uls(ws_svod: Worksheet, sv_map: Dict[str, int], uls_in_bd: Set[str]) -> int:
+    ul_col = sv_map["ЮЛ"]
+    last_data = get_last_data_row(ws_svod, ul_col, start_row=2)
     if last_data < 2:
         return 0
 
     to_delete: List[int] = []
     for r in range(2, last_data + 1):
-        agent = get_cell_str(ws_svod, r, agent_col)
-        if agent and agent not in agents_in_bd:
+        ul = get_cell_str(ws_svod, r, ul_col)
+        if ul and ul not in uls_in_bd:
             to_delete.append(r)
 
     deleted = 0
@@ -414,43 +434,54 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     if missing_svod:
         raise RuntimeError(f'Missing columns in "{SHEET_SVOD}": {missing_svod}')
 
-    agent_col_bd = bd_map["Агент ID (Столото)"]
+    # Ключ группировки — ЮЛ (один ЮЛ = одна строка СВОДНОЙ)
+    ul_col_bd = bd_map["ЮЛ"]
     terminal_col_bd = bd_map["Terminal ID (Столото)"]
+    bd_comments_col = bd_map.get(BD_CERT_COMMENT_COL)  # может отсутствовать в старых файлах
 
-    bd_by_agent: Dict[str, Dict[str, str]] = {}
-    terminals_by_agent: Dict[str, List[int]] = {}
-    agents_in_bd: Set[str] = set()
+    bd_by_ul: Dict[str, Dict[str, str]] = {}
+    terminals_by_ul: Dict[str, List[int]] = {}
+    cert_by_ul: Dict[str, int] = {}  # AND-логика: 1 только если все строки ЮЛ дают cert=1
+    uls_in_bd: Set[str] = set()
 
     for r in range(2, ws_bd.max_row + 1):
-        agent = get_cell_str(ws_bd, r, agent_col_bd)
-        if not agent:
+        ul = get_cell_str(ws_bd, r, ul_col_bd)
+        if not ul:
             continue
 
-        agents_in_bd.add(agent)
+        uls_in_bd.add(ul)
 
         term_raw = ws_bd.cell(row=r, column=terminal_col_bd).value
         term_num = parse_terminal_id(term_raw) if term_raw is not None else None
         if term_num is not None:
-            terminals_by_agent.setdefault(agent, []).append(term_num)
+            terminals_by_ul.setdefault(ul, []).append(term_num)
 
-        payload = bd_by_agent.setdefault(agent, {k: "" for k in BD_REQUIRED})
+        # вычисляем cert по комментарию этой строки
+        bd_comment = ws_bd.cell(row=r, column=bd_comments_col).value if bd_comments_col else None
+        row_cert = cert_value_from_bd_comment(bd_comment)
+        if ul not in cert_by_ul:
+            cert_by_ul[ul] = row_cert
+        elif row_cert == 0:
+            cert_by_ul[ul] = 0  # хоть одна строка с "плохим" комментарием → 0
+
+        payload = bd_by_ul.setdefault(ul, {k: "" for k in BD_REQUIRED})
         for col_name in BD_REQUIRED:
             val = get_cell_str(ws_bd, r, bd_map[col_name])
             if payload[col_name] == "" and val != "":
                 payload[col_name] = val
 
-    for agent, nums in terminals_by_agent.items():
+    for ul, nums in terminals_by_ul.items():
         rngs = compress_ranges(nums)
-        bd_by_agent[agent]["Terminal ID (Столото)"] = format_ranges(rngs)
+        bd_by_ul[ul]["Terminal ID (Столото)"] = format_ranges(rngs)
 
-    deleted = delete_missing_agents(ws_svod, sv_map, agents_in_bd)
+    deleted = delete_missing_uls(ws_svod, sv_map, uls_in_bd)
     if deleted:
         print(f"Deleted from SVOD (not in BD): {deleted}")
 
     sv_map = header_index_map(ws_svod)
-    agent_col_sv = sv_map["Агент ID (Столото)"]
+    ul_col_sv = sv_map["ЮЛ"]
 
-    last_data_row = get_last_data_row(ws_svod, agent_col_sv, start_row=2)
+    last_data_row = get_last_data_row(ws_svod, ul_col_sv, start_row=2)
 
     # Шаблон строки ДАННЫХ — строго строка 2 (если она существует), иначе last_data_row
     if ws_svod.max_row >= 2:
@@ -460,23 +491,28 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
 
     max_col = ws_svod.max_column
 
-    existing_row_by_agent: Dict[str, int] = {}
+    existing_row_by_ul: Dict[str, int] = {}
     if last_data_row >= 2:
         for r in range(2, last_data_row + 1):
-            agent = get_cell_str(ws_svod, r, agent_col_sv)
-            if agent:
-                existing_row_by_agent[agent] = r
+            ul = get_cell_str(ws_svod, r, ul_col_sv)
+            if ul:
+                existing_row_by_ul[ul] = r
 
     inserted = 0
     updated = 0
 
     append_row = last_data_row + 1 if last_data_row >= 2 else 2
 
-    for agent, payload in bd_by_agent.items():
-        if agent in existing_row_by_agent:
-            rr = existing_row_by_agent[agent]
+    for ul, payload in bd_by_ul.items():
+        cert_val = cert_by_ul.get(ul, 1)
+
+        if ul in existing_row_by_ul:
+            rr = existing_row_by_ul[ul]
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
+            # обновляем "Добавлен сертификат" по комментарию из БД
+            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = cert_val
+            # НЕ ТРОГАЕМ: "Добавлен сертификат (МТС)" и "Билеты продаются"
             updated += 1
         else:
             rr = append_row
@@ -488,14 +524,16 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
 
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            # новые 3 столбца: по умолчанию = 0
-            for col_name in SVOD_BOOL_COLS:
-                ws_svod.cell(row=rr, column=sv_map[col_name]).value = 0
+            # "Добавлен сертификат" — из комментария БД
+            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = cert_val
+            # остальные bool-колонки для новых строк: 0 по умолчанию
+            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат (МТС)"]).value = 0
+            ws_svod.cell(row=rr, column=sv_map["Билеты продаются"]).value = 0
 
             inserted += 1
 
     # нормализация 0/1 только по реальным данным
-    last_data_row = get_last_data_row(ws_svod, agent_col_sv, start_row=2)
+    last_data_row = get_last_data_row(ws_svod, ul_col_sv, start_row=2)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
         for r in range(2, last_data_row + 1):
@@ -515,7 +553,7 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
 
     print(
         f"Inside sync done: inserted={inserted}, updated={updated}, deleted={deleted}, "
-        f"total_source_agents={len(bd_by_agent)}"
+        f"total_source_uls={len(bd_by_ul)}"
     )
 
     out = io.BytesIO()
@@ -557,14 +595,18 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
 
     ENG_COL = "ENG"
     UL_COL = "ЮЛ"
-    BOOL_COLS = ["Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются"]
+    # Только это поле принадлежит франчайзи — никогда не перезаписываем из SOURCE
+    MTS_CERT_COL = "Добавлен сертификат (МТС)"
+    # Колонки, которые нужно отображать с CF (включая защищённую)
+    COLS_WITH_CF = ["Добавлен сертификат", MTS_CERT_COL, "Билеты продаются"]
 
-    # Базовые колонки для синка из SOURCE (без bool и без ENG)
+    # Колонки для синка из SOURCE (ЮЛ, Terminal ID, Добавлен сертификат, Билеты продаются)
+    # МТС ID и MTS_CERT_COL всегда исключаются
     cols_raw = parse_columns_list(COLUMNS_TO_SYNC_EXPORT)
     if KEY_COLUMN_EXPORT not in cols_raw:
         cols_raw = [KEY_COLUMN_EXPORT] + cols_raw
 
-    cols_sync = [c for c in cols_raw if c not in BOOL_COLS and c != ENG_COL]
+    cols_sync = [c for c in cols_raw if c != MTS_CERT_COL and c != ENG_COL and c != "МТС ID"]
 
     src_map = header_index_map(ws_src)
     tgt_map = header_index_map(ws_tgt)
@@ -574,7 +616,7 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             f'Source sheet "{SRC_SHEET_FOR_EXPORT}": key column "{KEY_COLUMN_EXPORT}" not found'
         )
 
-    # --- Ensure headers in TARGET: (sync cols) + ENG + 3 bool cols ---
+    # --- Ensure headers in TARGET: (sync cols) + ENG + MTS cert col ---
     h_last = last_header_col(ws_tgt)
 
     def ensure_header(name: str) -> None:
@@ -590,9 +632,7 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
         ensure_header(name)
 
     ensure_header(ENG_COL)
-
-    for b in BOOL_COLS:
-        ensure_header(b)
+    ensure_header(MTS_CERT_COL)
 
     # refresh after header changes
     tgt_map = header_index_map(ws_tgt)
@@ -632,9 +672,10 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
     for key, payload in src_data.items():
         if key in tgt_row_by_key:
             rr = tgt_row_by_key[key]
-            # обновляем только "обычные" колонки (bool не трогаем)
+            # синкаем все cols_sync (ЮЛ, Terminal ID, Добавлен сертификат, Билеты продаются)
             for col in cols_sync:
                 ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
+            # MTS_CERT_COL — НЕ ТРОГАЕМ
             updated += 1
         else:
             rr = append_row
@@ -643,27 +684,24 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
             if template_row >= 2 and template_row <= ws_tgt.max_row:
                 copy_row_style(ws_tgt, template_row, rr, max_col)
 
-            # пишем обычные колонки из SOURCE
+            # пишем все синкаемые колонки из SOURCE
             for col in cols_sync:
                 ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
 
-            # новые строки: bool колонки по умолчанию 0
-            for b in BOOL_COLS:
-                ws_tgt.cell(row=rr, column=tgt_map[b]).value = 0
-
+            # MTS_CERT_COL для новых строк — НЕ ТРОГАЕМ (оставляем пустым, это поле франчайзи)
             # ENG — заполним ниже (автотранслит), тут оставляем пусто
             ws_tgt.cell(row=rr, column=tgt_map[ENG_COL]).value = None
 
             inserted += 1
 
-    # --- Normalize bool cols in TARGET: не перезаписываем 0/1, но:
-    #     - пусто -> 0
-    #     - true/false -> 1/0
     key_col = tgt_map[KEY_COLUMN_EXPORT]
     tgt_last = get_last_data_row(ws_tgt, key_col, start_row=2)
     tgt_last = max(tgt_last, 2)
 
-    for b in BOOL_COLS:
+    # --- Нормализация синкаемых bool-колонок (empty→0, bool→int) ---
+    for b in [c for c in cols_sync if c in ("Добавлен сертификат", "Билеты продаются")]:
+        if b not in tgt_map:
+            continue
         c = tgt_map[b]
         for r in range(2, tgt_last + 1):
             v = ws_tgt.cell(row=r, column=c).value
@@ -671,13 +709,24 @@ def sync_source_to_target(source_bytes: bytes, target_bytes: bytes) -> bytes:
                 ws_tgt.cell(row=r, column=c).value = 0
                 continue
             norm = normalize_bool_to_01(v)
-            if norm is None:
-                continue
-            ws_tgt.cell(row=r, column=c).value = norm
+            if norm is not None:
+                ws_tgt.cell(row=r, column=c).value = norm
 
-    # --- Re-apply conditional formatting in TARGET for bool cols ---
-    # (добавляем правила; Яндекс/Excel должны их понять)
-    for b in BOOL_COLS:
+    # --- Нормализация MTS_CERT_COL: только не-пустые (НЕ ставим 0 для пустых) ---
+    if MTS_CERT_COL in tgt_map:
+        c = tgt_map[MTS_CERT_COL]
+        for r in range(2, tgt_last + 1):
+            v = ws_tgt.cell(row=r, column=c).value
+            if is_empty_cell(v):
+                continue  # НЕ ТРОГАЕМ пустые ячейки
+            norm = normalize_bool_to_01(v)
+            if norm is not None:
+                ws_tgt.cell(row=r, column=c).value = norm
+
+    # --- Re-apply conditional formatting для всех трёх колонок ---
+    for b in COLS_WITH_CF:
+        if b not in tgt_map:
+            continue
         c = tgt_map[b]
         letter = col_to_letter(c)
         apply_bool_cf(ws_tgt, letter, start_row=2, end_row=tgt_last)
