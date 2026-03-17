@@ -1,4 +1,4 @@
-name: Sync TARGET -> SOURCE (mts cert)
+name: Sheets Sync (СВОДНАЯ ↔ Лист1)
 
 on:
   workflow_dispatch:
@@ -16,9 +16,9 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Run TARGET -> SOURCE
+      - name: Run sheets sync
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-        run: python sync_mts_target_to_source.py
+        run: python sync_sheets.py
