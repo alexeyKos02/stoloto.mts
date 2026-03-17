@@ -16,21 +16,23 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Inside SOURCE
+      - name: Inside SOURCE (БД -> СВОДНАЯ)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
-        run: python sync_inside_source.py
+          RUN_INSIDE_SOURCE: "1"
+          RUN_SYNC_TO_TARGET: "0"
+        run: python sync_xlsx.py
 
       - name: Wait a bit (avoid Disk lock)
         run: sleep 3
 
-      - name: SOURCE -> TARGET (cert + tickets)
+      - name: SOURCE -> TARGET (СВОДНАЯ -> Лист1 cert + tickets)
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-        run: python sync_source_to_target.py
+        run: python sync_bools_source_to_target.py
 
       - name: Wait a bit (avoid Disk lock)
         run: sleep 3
@@ -40,4 +42,4 @@ jobs:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-        run: python sync_target_to_source.py
+        run: python sync_mts_target_to_source.py
