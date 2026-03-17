@@ -155,11 +155,9 @@ def step1_bd_to_svod(wb_src):
 
     ul_col_bd = bd_map["ЮЛ"]
     terminal_col_bd = bd_map["Terminal ID (Столото)"]
-    bd_comments_col = bd_map.get(BD_CERT_COMMENT_COL)
 
     bd_by_ul: Dict[str, Dict[str, str]] = {}
     terminals_by_ul: Dict[str, List[int]] = {}
-    cert_by_ul: Dict[str, int] = {}
     uls_in_bd: Set[str] = set()
 
     for r in range(2, ws_bd.max_row + 1):
@@ -172,13 +170,6 @@ def step1_bd_to_svod(wb_src):
         term_num = parse_terminal_id(term_raw) if term_raw is not None else None
         if term_num is not None:
             terminals_by_ul.setdefault(ul, []).append(term_num)
-
-        bd_comment = ws_bd.cell(row=r, column=bd_comments_col).value if bd_comments_col else None
-        row_cert = cert_value_from_bd_comment(bd_comment)
-        if ul not in cert_by_ul:
-            cert_by_ul[ul] = row_cert
-        elif row_cert == 0:
-            cert_by_ul[ul] = 0
 
         payload = bd_by_ul.setdefault(ul, {k: "" for k in BD_REQUIRED})
         for col_name in BD_REQUIRED:
@@ -211,14 +202,11 @@ def step1_bd_to_svod(wb_src):
     append_row = last_data_row + 1 if last_data_row >= 2 else 2
 
     for ul, payload in bd_by_ul.items():
-        cert_val = cert_by_ul.get(ul, 1)
-
         if ul in existing_row_by_ul:
             rr = existing_row_by_ul[ul]
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = cert_val
-            # НЕ ТРОГАЕМ: "Добавлен сертификат (МТС)" и "Билеты продаются"
+            # НЕ ТРОГАЕМ: "Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются"
             updated += 1
         else:
             rr = append_row
@@ -227,7 +215,8 @@ def step1_bd_to_svod(wb_src):
                 copy_row_style(ws_svod, template_row, rr, max_col)
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = cert_val
+            # все bool-колонки для новых строк: 0 по умолчанию
+            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = 0
             ws_svod.cell(row=rr, column=sv_map[MTS_CERT_COL]).value = 0
             ws_svod.cell(row=rr, column=sv_map["Билеты продаются"]).value = 0
             inserted += 1
