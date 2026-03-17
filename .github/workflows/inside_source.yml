@@ -1,4 +1,4 @@
-name: Sync INSIDE SOURCE
+name: Inside SOURCE (БД → СВОДНАЯ)
 
 on:
   workflow_dispatch:
@@ -16,11 +16,8 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Run sync (INSIDE SOURCE)
+      - name: Run inside SOURCE sync
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
-          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }} # не используем, но НЕ УДАЛЯТЬ
-          RUN_INSIDE_SOURCE: "1"
-          RUN_SYNC_TO_TARGET: "1"
-        run: python sync_xlsx.py
+        run: python sync_inside_source.py
