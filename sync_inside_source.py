@@ -21,7 +21,6 @@ from sync_utils import (
     col_to_letter, copy_row_style, ensure_columns_at_end,
     normalize_bool_to_01, apply_bool_cf,
     parse_terminal_id, compress_ranges, format_ranges,
-    cert_value_from_bd_comment,
 )
 
 
@@ -42,8 +41,6 @@ if not DISK_SOURCE_PATH:
 # =======================
 SHEET_BD = "БД"
 SHEET_SVOD = "СВОДНАЯ"
-
-BD_CERT_COMMENT_COL = "Комментарии"
 
 SVOD_BOOL_COLS = [
     "Добавлен сертификат",
@@ -123,11 +120,9 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     # Ключ группировки — ЮЛ (один ЮЛ = одна строка СВОДНОЙ)
     ul_col_bd = bd_map["ЮЛ"]
     terminal_col_bd = bd_map["Terminal ID (Столото)"]
-    bd_comments_col = bd_map.get(BD_CERT_COMMENT_COL)
 
     bd_by_ul: Dict[str, Dict[str, str]] = {}
     terminals_by_ul: Dict[str, List[int]] = {}
-    cert_by_ul: Dict[str, int] = {}  # AND-логика: 1 только если все строки ЮЛ дают cert=1
     uls_in_bd: Set[str] = set()
 
     for r in range(2, ws_bd.max_row + 1):
@@ -141,14 +136,6 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
         term_num = parse_terminal_id(term_raw) if term_raw is not None else None
         if term_num is not None:
             terminals_by_ul.setdefault(ul, []).append(term_num)
-
-        # вычисляем cert по комментарию этой строки
-        bd_comment = ws_bd.cell(row=r, column=bd_comments_col).value if bd_comments_col else None
-        row_cert = cert_value_from_bd_comment(bd_comment)
-        if ul not in cert_by_ul:
-            cert_by_ul[ul] = row_cert
-        elif row_cert == 0:
-            cert_by_ul[ul] = 0  # хоть одна строка с "плохим" комментарием → 0
 
         payload = bd_by_ul.setdefault(ul, {k: "" for k in BD_REQUIRED})
         for col_name in BD_REQUIRED:
@@ -184,15 +171,11 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     append_row = last_data_row + 1 if last_data_row >= 2 else 2
 
     for ul, payload in bd_by_ul.items():
-        cert_val = cert_by_ul.get(ul, 1)
-
         if ul in existing_row_by_ul:
             rr = existing_row_by_ul[ul]
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            # обновляем "Добавлен сертификат" по комментарию из БД
-            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = cert_val
-            # НЕ ТРОГАЕМ: "Добавлен сертификат (МТС)" и "Билеты продаются"
+            # НЕ ТРОГАЕМ: "Добавлен сертификат", "Добавлен сертификат (МТС)", "Билеты продаются"
             updated += 1
         else:
             rr = append_row
@@ -203,8 +186,8 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
 
             for col_name in SVOD_REQUIRED_BASE:
                 ws_svod.cell(row=rr, column=sv_map[col_name]).value = payload.get(col_name, "")
-            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = cert_val
-            # остальные bool-колонки для новых строк: 0 по умолчанию
+            # все bool-колонки для новых строк: 0 по умолчанию
+            ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат"]).value = 0
             ws_svod.cell(row=rr, column=sv_map["Добавлен сертификат (МТС)"]).value = 0
             ws_svod.cell(row=rr, column=sv_map["Билеты продаются"]).value = 0
             inserted += 1
