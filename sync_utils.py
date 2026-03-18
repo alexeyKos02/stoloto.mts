@@ -4,6 +4,7 @@
 """
 
 import io
+import re
 import time
 from copy import copy
 from typing import Dict, List, Optional, Set, Tuple
@@ -204,10 +205,11 @@ FILL_GRAY = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="sol
 
 def clear_col_cf(ws: Worksheet, col_letter: str) -> None:
     """Удаляет все CF-правила, в диапазоне которых участвует данная колонка."""
-    letter_upper = col_letter.upper()
+    # Матчим именно колонку col_letter, а не подстроку (E ≠ AE)
+    pattern = re.compile(r'(?<![A-Z])' + re.escape(col_letter.upper()) + r'\d')
     to_remove = [
         key for key in list(ws.conditional_formatting._cf_rules.keys())
-        if letter_upper in str(key).upper()
+        if pattern.search(str(key).upper())
     ]
     for key in to_remove:
         del ws.conditional_formatting._cf_rules[key]
