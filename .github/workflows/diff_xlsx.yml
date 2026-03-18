@@ -1,14 +1,7 @@
-name: "Diff XLSX (compare backup vs current)"
+name: "Diff XLSX (backup vs current)"
 
 on:
   workflow_dispatch:
-    inputs:
-      disk_file_old:
-        description: "Путь к бекапу на Яндекс Диске"
-        required: true
-      disk_file_new:
-        description: "Путь к текущему файлу на Яндекс Диске"
-        required: true
 
 jobs:
   diff:
@@ -25,6 +18,6 @@ jobs:
       - name: Run diff
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
-          DISK_FILE_OLD: ${{ github.event.inputs.disk_file_old }}
-          DISK_FILE_NEW: ${{ github.event.inputs.disk_file_new }}
+          DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
+          DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
         run: python diff_xlsx.py
