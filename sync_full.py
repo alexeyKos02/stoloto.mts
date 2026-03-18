@@ -505,26 +505,26 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
     tgt_map = header_index_map(ws_tgt)
 
     bd_last = get_last_data_row(ws_bd, bd_map[COL_AGENT], start_row=2)
-    tgt_last = get_last_data_row(ws_tgt, tgt_map.get(COL_AGENT, 1), start_row=2) if COL_AGENT in tgt_map else 1
+    tgt_last = get_last_data_row(ws_tgt, tgt_map.get(COL_TERMINAL, 1), start_row=2) if COL_TERMINAL in tgt_map else 1
 
-    row_by_agent: Dict[str, int] = {}
-    if COL_AGENT in tgt_map and tgt_last >= 2:
+    row_by_terminal: Dict[str, int] = {}
+    if COL_TERMINAL in tgt_map and tgt_last >= 2:
         for r in range(2, tgt_last + 1):
-            a = get_cell_str(ws_tgt, r, tgt_map[COL_AGENT])
-            if a:
-                row_by_agent[a] = r
+            t = get_cell_str(ws_tgt, r, tgt_map[COL_TERMINAL])
+            if t:
+                row_by_terminal[t] = r
 
-    # Собрать все agent IDs из БД
-    agents_in_bd: Set[str] = set()
+    # Собрать все Terminal IDs из БД
+    terminals_in_bd: Set[str] = set()
     for r in range(2, bd_last + 1):
-        a = get_cell_str(ws_bd, r, bd_map[COL_AGENT])
-        if a:
-            agents_in_bd.add(a)
+        t = get_cell_str(ws_bd, r, bd_map[COL_TERMINAL])
+        if t:
+            terminals_in_bd.add(t)
 
-    # Удалить из терминалов агентов, которых больше нет в БД
+    # Удалить из терминалов те, которых больше нет в БД
     deleted = 0
     rows_to_delete = sorted(
-        [row for agent, row in row_by_agent.items() if agent not in agents_in_bd],
+        [row for terminal, row in row_by_terminal.items() if terminal not in terminals_in_bd],
         reverse=True,
     )
     for r in rows_to_delete:
@@ -532,13 +532,13 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
         deleted += 1
     if deleted:
         tgt_map = header_index_map(ws_tgt)
-        tgt_last = get_last_data_row(ws_tgt, tgt_map.get(COL_AGENT, 1), start_row=2) if COL_AGENT in tgt_map else 1
-        row_by_agent = {}
-        if COL_AGENT in tgt_map and tgt_last >= 2:
+        tgt_last = get_last_data_row(ws_tgt, tgt_map.get(COL_TERMINAL, 1), start_row=2) if COL_TERMINAL in tgt_map else 1
+        row_by_terminal = {}
+        if COL_TERMINAL in tgt_map and tgt_last >= 2:
             for r in range(2, tgt_last + 1):
-                a = get_cell_str(ws_tgt, r, tgt_map[COL_AGENT])
-                if a:
-                    row_by_agent[a] = r
+                t = get_cell_str(ws_tgt, r, tgt_map[COL_TERMINAL])
+                if t:
+                    row_by_terminal[t] = r
 
     template_row = 2 if ws_tgt.max_row >= 2 else (tgt_last if tgt_last >= 2 else 2)
     max_col = last_header_col(ws_tgt)
@@ -550,7 +550,8 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
 
     for r in range(2, bd_last + 1):
         agent = get_cell_str(ws_bd, r, bd_map[COL_AGENT])
-        if not agent:
+        terminal = get_cell_str(ws_bd, r, bd_map[COL_TERMINAL])
+        if not agent or not terminal:
             continue
 
         bd_comment_val = ws_bd.cell(row=r, column=bd_map[BD_CERT_COMMENT_COL]).value if bd_has_comments else None
@@ -568,7 +569,7 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
         payload: Dict[str, object] = {
             KEY_COL: bd_val(KEY_COL),
             COL_MTS: bd_val(COL_MTS),
-            COL_TERMINAL: bd_val(COL_TERMINAL),
+            COL_TERMINAL: terminal,
             COL_REGION: bd_val(COL_REGION),
             COL_CITY: bd_val(COL_CITY),
             COL_STREET: bd_val(COL_STREET),
@@ -577,8 +578,8 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
             COL_CERT: cert_val,
         }
 
-        if agent in row_by_agent:
-            rr = row_by_agent[agent]
+        if terminal in row_by_terminal:
+            rr = row_by_terminal[terminal]
             for col in SYNC_COLS:
                 if col in tgt_map:
                     ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
@@ -587,7 +588,7 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
         else:
             rr = max(tgt_last, 1) + 1
             tgt_last = rr
-            row_by_agent[agent] = rr
+            row_by_terminal[terminal] = rr
 
             if 2 <= template_row <= ws_tgt.max_row:
                 copy_row_style(ws_tgt, template_row, rr, max_col)
@@ -605,7 +606,7 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
             inserted += 1
 
     # CF
-    end_row = max(get_last_data_row(ws_tgt, tgt_map[COL_AGENT], start_row=2) if COL_AGENT in tgt_map else 2, 2)
+    end_row = max(get_last_data_row(ws_tgt, tgt_map[COL_TERMINAL], start_row=2) if COL_TERMINAL in tgt_map else 2, 2)
     for col_name in [COL_CERT, COL_CERT_MTS]:
         if col_name in tgt_map:
             letter = col_to_letter(tgt_map[col_name])
