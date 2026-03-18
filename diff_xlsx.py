@@ -181,6 +181,7 @@ def write_diff_sheet(
     row += 1
 
     max_rows = max(len(rows_old), len(rows_new))
+    prev_type = None  # "modified", "deleted", "added"
 
     for i in range(max_rows):
         excel_row = i + 2  # номер строки в оригинальном файле
@@ -199,6 +200,10 @@ def write_diff_sheet(
 
             if not changed_cols:
                 continue  # строка не изменилась
+
+            if prev_type is not None:
+                row += 1
+            prev_type = "modified"
 
             changes += len(changed_cols)
 
@@ -225,6 +230,11 @@ def write_diff_sheet(
             row += 1
 
         elif has_old and not has_new:
+            cur_type = "deleted"
+            if prev_type is not None and prev_type != cur_type:
+                row += 1
+            prev_type = cur_type
+
             # Удалённая строка — вся красная
             changes += 1
             label_cell = ws_report.cell(row=row, column=1, value=f"#{excel_row} УДАЛЕНА")
@@ -238,6 +248,11 @@ def write_diff_sheet(
             row += 1
 
         elif not has_old and has_new:
+            cur_type = "added"
+            if prev_type is not None and prev_type != cur_type:
+                row += 1
+            prev_type = cur_type
+
             # Добавленная строка — вся зелёная
             changes += 1
             label_cell = ws_report.cell(row=row, column=1, value=f"#{excel_row} ДОБАВЛЕНА")
