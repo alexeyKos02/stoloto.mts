@@ -12,6 +12,7 @@ import io
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 from openpyxl import load_workbook
@@ -633,6 +634,22 @@ def main() -> None:
     print(f"Download TARGET: {DISK_TARGET_PATH}")
     tgt_bytes = disk_download(DISK_TARGET_PATH, YANDEX_OAUTH_TOKEN)
     print(f"  TARGET: {len(tgt_bytes)} bytes")
+
+    # Бекапы перед синхронизацией
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+
+    def backup_path(original: str) -> str:
+        base, ext = os.path.splitext(original)
+        return f"{base}_backup_{ts}{ext}"
+
+    bk_src = backup_path(DISK_SOURCE_PATH)
+    bk_tgt = backup_path(DISK_TARGET_PATH)
+
+    print(f"Backup SOURCE → {bk_src}")
+    disk_upload(bk_src, src_bytes, YANDEX_OAUTH_TOKEN)
+
+    print(f"Backup TARGET → {bk_tgt}")
+    disk_upload(bk_tgt, tgt_bytes, YANDEX_OAUTH_TOKEN)
 
     wb_src = load_workbook(io.BytesIO(src_bytes))
     wb_tgt = load_workbook(io.BytesIO(tgt_bytes))
