@@ -300,6 +300,30 @@ def step2_svod_to_target_list(wb_src, wb_tgt):
             if key:
                 tgt_row_by_key[key] = r
 
+    # Удаляем строки из TARGET, чьего ЮЛ больше нет в SOURCE
+    deleted = 0
+    if tgt_last >= 2:
+        rows_to_delete = [
+            r for r, key in sorted(tgt_row_by_key.items(), key=lambda x: x[1])
+            if key not in src_data
+        ]
+        # Нет — нужен обратный порядок: ключ=ЮЛ, значение=row
+        rows_to_delete = sorted(
+            [row for key, row in tgt_row_by_key.items() if key not in src_data],
+            reverse=True,
+        )
+        for r in rows_to_delete:
+            ws_tgt.delete_rows(r, 1)
+            deleted += 1
+        if deleted:
+            tgt_map = header_index_map(ws_tgt)
+            tgt_last = get_last_data_row(ws_tgt, tgt_map[KEY_COL], start_row=2)
+            tgt_row_by_key = {}
+            for r in range(2, tgt_last + 1):
+                key = get_cell_str(ws_tgt, r, tgt_map[KEY_COL])
+                if key:
+                    tgt_row_by_key[key] = r
+
     template_row = 2 if ws_tgt.max_row >= 2 else 2
     max_col = last_header_col(ws_tgt)
 
@@ -378,7 +402,7 @@ def step2_svod_to_target_list(wb_src, wb_tgt):
         if filled:
             print(f"  ENG filled: {filled}")
 
-    print(f"  Step 2 done: updated={updated}, inserted={inserted}, total={len(src_data)}")
+    print(f"  Step 2 done: updated={updated}, inserted={inserted}, deleted={deleted}, total={len(src_data)}")
 
 
 # ===============================================================
@@ -489,6 +513,32 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
             if a:
                 row_by_agent[a] = r
 
+    # Собрать все agent IDs из БД
+    agents_in_bd: Set[str] = set()
+    for r in range(2, bd_last + 1):
+        a = get_cell_str(ws_bd, r, bd_map[COL_AGENT])
+        if a:
+            agents_in_bd.add(a)
+
+    # Удалить из терминалов агентов, которых больше нет в БД
+    deleted = 0
+    rows_to_delete = sorted(
+        [row for agent, row in row_by_agent.items() if agent not in agents_in_bd],
+        reverse=True,
+    )
+    for r in rows_to_delete:
+        ws_tgt.delete_rows(r, 1)
+        deleted += 1
+    if deleted:
+        tgt_map = header_index_map(ws_tgt)
+        tgt_last = get_last_data_row(ws_tgt, tgt_map.get(COL_AGENT, 1), start_row=2) if COL_AGENT in tgt_map else 1
+        row_by_agent = {}
+        if COL_AGENT in tgt_map and tgt_last >= 2:
+            for r in range(2, tgt_last + 1):
+                a = get_cell_str(ws_tgt, r, tgt_map[COL_AGENT])
+                if a:
+                    row_by_agent[a] = r
+
     template_row = 2 if ws_tgt.max_row >= 2 else (tgt_last if tgt_last >= 2 else 2)
     max_col = last_header_col(ws_tgt)
 
@@ -560,7 +610,7 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
             letter = col_to_letter(tgt_map[col_name])
             apply_bool_cf(ws_tgt, letter, start_row=2, end_row=end_row)
 
-    print(f"  Step 4 done: updated={updated}, inserted={inserted}, bd_rows={max(bd_last - 1, 0)}")
+    print(f"  Step 4 done: updated={updated}, inserted={inserted}, deleted={deleted}, bd_rows={max(bd_last - 1, 0)}")
 
 
 # ===============================================================
