@@ -4,14 +4,9 @@
 Автоматически находит последний *_backup_* файл рядом с оригиналом,
 скачивает оба и сравнивает все листы по-ячеечно.
 
-Сравнивает:
-  - SOURCE (ВНУТРЯНКА) текущий vs последний бекап
-  - TARGET (ВНЕШНЯЯ) текущий vs последний бекап
-
-Выводит:
-  [Лист1] строка 5, столбец "Добавлен сертификат": 0 → 1
-  [терминалы] строка 12: УДАЛЕНА (ЮЛ="ООО Ромашка")
-  [терминалы] строка 15: ДОБАВЛЕНА (Агент ID="123456789")
+Результат — .xlsx файл-отчёт на Яндекс Диске:
+  Для каждой изменённой строки: сверху старая (красные ячейки), снизу новая (зелёные ячейки).
+  Удалённые строки — полностью красные, добавленные — полностью зелёные.
 
 ENV:
   YANDEX_OAUTH_TOKEN
@@ -23,13 +18,15 @@ import io
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import requests
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.worksheet.worksheet import Worksheet
 
-from sync_utils import disk_download, disk_upload, header_index_map, get_last_data_row, is_empty_cell
+from sync_utils import disk_download, disk_upload, header_index_map, get_last_data_row
 
 
 # =======================
@@ -46,23 +43,30 @@ if not DISK_SOURCE_PATH:
 if not DISK_TARGET_PATH:
     raise RuntimeError("ERROR: DISK_TARGET_PATH is empty")
 
-
 YANDEX_API = "https://cloud-api.yandex.net/v1/disk"
+
+# Стили
+FILL_RED = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+FILL_GREEN = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+FILL_HEADER = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+FILL_SECTION = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+FONT_HEADER = Font(bold=True, color="FFFFFF", size=11)
+FONT_SECTION = Font(bold=True, size=11)
+FONT_LABEL = Font(bold=True, italic=True, size=10)
+THIN_BORDER = Border(
+    left=Side(style="thin"), right=Side(style="thin"),
+    top=Side(style="thin"), bottom=Side(style="thin"),
+)
 
 
 # =======================
 # FIND LATEST BACKUP
 # =======================
 def find_latest_backup(original_path: str, token: str) -> Optional[str]:
-    """
-    Ищет последний бекап файла на Яндекс Диске.
-    Бекапы лежат в той же папке с именем: <name>_backup_<timestamp>.xlsx
-    """
     folder = os.path.dirname(original_path)
     basename = os.path.basename(original_path)
     name_no_ext, ext = os.path.splitext(basename)
 
-    # Паттерн: name_backup_2026-03-18T12-30-00.xlsx
     backup_pattern = re.compile(
         re.escape(name_no_ext) + r'_backup_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})' + re.escape(ext)
     )
@@ -79,7 +83,7 @@ def find_latest_backup(original_path: str, token: str) -> Optional[str]:
 
     items = r.json().get("_embedded", {}).get("items", [])
 
-    backups: List[Tuple[str, str]] = []  # (timestamp, path)
+    backups: List[Tuple[str, str]] = []
     for item in items:
         name = item.get("name", "")
         m = backup_pattern.match(name)
@@ -89,13 +93,12 @@ def find_latest_backup(original_path: str, token: str) -> Optional[str]:
     if not backups:
         return None
 
-    # Сортируем по timestamp (строковое сравнение работает для ISO формата)
     backups.sort(key=lambda x: x[0], reverse=True)
     return backups[0][1]
 
 
 # =======================
-# DIFF HELPERS
+# HELPERS
 # =======================
 def cell_str(v) -> str:
     if v is None:
@@ -103,11 +106,13 @@ def cell_str(v) -> str:
     return str(v).strip()
 
 
-def read_sheet_data(ws: Worksheet) -> Tuple[Dict[str, int], int, List[Dict[str, str]]]:
+def read_sheet_data(ws: Worksheet) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Возвращает (headers, rows). Каждый row — dict {col_name: value_str}."""
     hmap = header_index_map(ws)
     if not hmap:
-        return hmap, 1, []
+        return [], []
 
+    headers = list(hmap.keys())
     first_col = next(iter(hmap.values()))
     last = get_last_data_row(ws, first_col, start_row=2)
 
@@ -118,7 +123,7 @@ def read_sheet_data(ws: Worksheet) -> Tuple[Dict[str, int], int, List[Dict[str, 
             row_data[name] = cell_str(ws.cell(row=r, column=col_idx).value)
         rows.append(row_data)
 
-    return hmap, last, rows
+    return headers, rows
 
 
 def row_label(row_data: Dict[str, str]) -> str:
@@ -128,63 +133,154 @@ def row_label(row_data: Dict[str, str]) -> str:
     for k, v in row_data.items():
         if v:
             return f'{k}="{v}"'
-    return "(пустая строка)"
+    return ""
 
 
-def diff_sheet(sheet_name: str, ws_old: Worksheet, ws_new: Worksheet) -> List[str]:
-    changes: List[str] = []
-    prefix = f"[{sheet_name}]"
+# =======================
+# WRITE DIFF TO XLSX SHEET
+# =======================
+def write_diff_sheet(
+    ws_report: Worksheet,
+    sheet_name: str,
+    ws_old: Worksheet,
+    ws_new: Worksheet,
+    start_row: int,
+) -> Tuple[int, int]:
+    """
+    Записывает diff в ws_report начиная с start_row.
+    Возвращает (next_row, change_count).
+    """
+    headers_old, rows_old = read_sheet_data(ws_old)
+    headers_new, rows_new = read_sheet_data(ws_new)
 
-    hmap_old, _, rows_old = read_sheet_data(ws_old)
-    hmap_new, _, rows_new = read_sheet_data(ws_new)
+    all_cols = list(dict.fromkeys(headers_old + headers_new))
+    if not all_cols:
+        return start_row, 0
 
-    all_cols = list(dict.fromkeys(list(hmap_old.keys()) + list(hmap_new.keys())))
+    changes = 0
+    row = start_row
 
-    for col in all_cols:
-        if col in hmap_new and col not in hmap_old:
-            changes.append(f'{prefix} НОВАЯ КОЛОНКА: "{col}"')
-    for col in all_cols:
-        if col in hmap_old and col not in hmap_new:
-            changes.append(f'{prefix} УДАЛЕНА КОЛОНКА: "{col}"')
+    # Секция: имя листа
+    ws_report.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(all_cols) + 1)
+    sec_cell = ws_report.cell(row=row, column=1, value=f"Лист: {sheet_name}")
+    sec_cell.fill = FILL_SECTION
+    sec_cell.font = FONT_SECTION
+    row += 1
+
+    # Заголовки таблицы: "Тип" + колонки
+    ws_report.cell(row=row, column=1, value="Строка")
+    for ci, col_name in enumerate(all_cols):
+        c = ws_report.cell(row=row, column=ci + 2, value=col_name)
+        c.fill = FILL_HEADER
+        c.font = FONT_HEADER
+        c.border = THIN_BORDER
+    h_cell = ws_report.cell(row=row, column=1)
+    h_cell.fill = FILL_HEADER
+    h_cell.font = FONT_HEADER
+    h_cell.border = THIN_BORDER
+    row += 1
 
     max_rows = max(len(rows_old), len(rows_new))
 
     for i in range(max_rows):
-        row_num = i + 2
-
+        excel_row = i + 2  # номер строки в оригинальном файле
         has_old = i < len(rows_old)
         has_new = i < len(rows_new)
 
-        if has_old and not has_new:
-            changes.append(f'{prefix} строка {row_num}: УДАЛЕНА ({row_label(rows_old[i])})')
-            continue
-        if not has_old and has_new:
-            changes.append(f'{prefix} строка {row_num}: ДОБАВЛЕНА ({row_label(rows_new[i])})')
-            continue
+        if has_old and has_new:
+            old_row = rows_old[i]
+            new_row = rows_new[i]
 
-        old_row = rows_old[i]
-        new_row = rows_new[i]
+            # Найти изменённые колонки
+            changed_cols = set()
+            for col in all_cols:
+                if old_row.get(col, "") != new_row.get(col, ""):
+                    changed_cols.add(col)
 
-        for col in all_cols:
-            old_val = old_row.get(col, "")
-            new_val = new_row.get(col, "")
-            if old_val != new_val:
-                old_display = old_val if old_val else "(пусто)"
-                new_display = new_val if new_val else "(пусто)"
-                changes.append(
-                    f'{prefix} строка {row_num}, столбец "{col}": {old_display} → {new_display}'
-                )
+            if not changed_cols:
+                continue  # строка не изменилась
 
-    return changes
+            changes += len(changed_cols)
+
+            # Старая строка (красная подсветка изменённых)
+            label_cell = ws_report.cell(row=row, column=1, value=f"#{excel_row} БЫЛО")
+            label_cell.font = FONT_LABEL
+            label_cell.border = THIN_BORDER
+            for ci, col in enumerate(all_cols):
+                c = ws_report.cell(row=row, column=ci + 2, value=old_row.get(col, ""))
+                c.border = THIN_BORDER
+                if col in changed_cols:
+                    c.fill = FILL_RED
+            row += 1
+
+            # Новая строка (зелёная подсветка изменённых)
+            label_cell = ws_report.cell(row=row, column=1, value=f"#{excel_row} СТАЛО")
+            label_cell.font = FONT_LABEL
+            label_cell.border = THIN_BORDER
+            for ci, col in enumerate(all_cols):
+                c = ws_report.cell(row=row, column=ci + 2, value=new_row.get(col, ""))
+                c.border = THIN_BORDER
+                if col in changed_cols:
+                    c.fill = FILL_GREEN
+            row += 1
+
+        elif has_old and not has_new:
+            # Удалённая строка — вся красная
+            changes += 1
+            label_cell = ws_report.cell(row=row, column=1, value=f"#{excel_row} УДАЛЕНА")
+            label_cell.font = FONT_LABEL
+            label_cell.fill = FILL_RED
+            label_cell.border = THIN_BORDER
+            for ci, col in enumerate(all_cols):
+                c = ws_report.cell(row=row, column=ci + 2, value=rows_old[i].get(col, ""))
+                c.fill = FILL_RED
+                c.border = THIN_BORDER
+            row += 1
+
+        elif not has_old and has_new:
+            # Добавленная строка — вся зелёная
+            changes += 1
+            label_cell = ws_report.cell(row=row, column=1, value=f"#{excel_row} ДОБАВЛЕНА")
+            label_cell.font = FONT_LABEL
+            label_cell.fill = FILL_GREEN
+            label_cell.border = THIN_BORDER
+            for ci, col in enumerate(all_cols):
+                c = ws_report.cell(row=row, column=ci + 2, value=rows_new[i].get(col, ""))
+                c.fill = FILL_GREEN
+                c.border = THIN_BORDER
+            row += 1
+
+    if changes == 0:
+        ws_report.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(all_cols) + 1)
+        ws_report.cell(row=row, column=1, value="Изменений нет")
+        row += 1
+
+    row += 1  # пустая строка между листами
+    return row, changes
 
 
-def diff_workbooks(label: str, backup_path: str, current_path: str, token: str, report: List[str]) -> int:
-    """Сравнивает два файла, пишет результат в report. Возвращает число изменений."""
-    report.append(f"{'=' * 60}")
-    report.append(f"  {label}")
-    report.append(f"  Бекап:   {backup_path}")
-    report.append(f"  Текущий: {current_path}")
-    report.append(f"{'=' * 60}")
+# =======================
+# DIFF WORKBOOKS → REPORT SHEET
+# =======================
+def diff_to_report_sheet(
+    ws_report: Worksheet,
+    label: str,
+    backup_path: str,
+    current_path: str,
+    token: str,
+    start_row: int,
+) -> Tuple[int, int]:
+    """Сравнивает два файла, пишет результат в ws_report. Возвращает (next_row, total_changes)."""
+    # Заголовок секции
+    ws_report.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=10)
+    title = ws_report.cell(row=start_row, column=1, value=label)
+    title.font = Font(bold=True, size=14)
+    start_row += 1
+
+    ws_report.cell(row=start_row, column=1, value=f"Бекап: {os.path.basename(backup_path)}")
+    start_row += 1
+    ws_report.cell(row=start_row, column=1, value=f"Текущий: {os.path.basename(current_path)}")
+    start_row += 2
 
     old_bytes = disk_download(backup_path, token)
     new_bytes = disk_download(current_path, token)
@@ -194,39 +290,43 @@ def diff_workbooks(label: str, backup_path: str, current_path: str, token: str, 
 
     all_sheets = list(dict.fromkeys(wb_old.sheetnames + wb_new.sheetnames))
     total = 0
+    row = start_row
 
-    for sheet_name in all_sheets:
-        if sheet_name in wb_old.sheetnames and sheet_name not in wb_new.sheetnames:
-            report.append(f"\n[{sheet_name}] ЛИСТ УДАЛЁН")
+    for sn in all_sheets:
+        if sn in wb_old.sheetnames and sn not in wb_new.sheetnames:
+            ws_report.cell(row=row, column=1, value=f"[{sn}] ЛИСТ УДАЛЁН")
+            ws_report.cell(row=row, column=1).fill = FILL_RED
+            row += 2
             total += 1
             continue
-        if sheet_name not in wb_old.sheetnames and sheet_name in wb_new.sheetnames:
-            report.append(f"\n[{sheet_name}] ЛИСТ ДОБАВЛЕН")
+        if sn not in wb_old.sheetnames and sn in wb_new.sheetnames:
+            ws_report.cell(row=row, column=1, value=f"[{sn}] ЛИСТ ДОБАВЛЕН")
+            ws_report.cell(row=row, column=1).fill = FILL_GREEN
+            row += 2
             total += 1
             continue
 
-        changes = diff_sheet(sheet_name, wb_old[sheet_name], wb_new[sheet_name])
-        if changes:
-            report.append(f"\n--- {sheet_name} ({len(changes)} изменений) ---")
-            for line in changes:
-                report.append(f"  {line}")
-            total += len(changes)
+        row, ch = write_diff_sheet(ws_report, sn, wb_old[sn], wb_new[sn], row)
+        total += ch
 
-    if total == 0:
-        report.append("\n  Изменений нет.")
-    else:
-        report.append(f"\n  Итого: {total} изменений")
-
-    return total
+    return row, total
 
 
 # =======================
 # ENTRYPOINT
 # =======================
 def main() -> None:
-    from datetime import datetime, timezone
+    wb_report = Workbook()
+    ws = wb_report.active
+    ws.title = "Diff Report"
 
-    report: List[str] = []
+    # Заголовок
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    ws.merge_cells("A1:J1")
+    title = ws.cell(row=1, column=1, value=f"Отчёт сравнения — {ts}")
+    title.font = Font(bold=True, size=16)
+    row = 3
+
     total_all = 0
 
     for label, path in [("SOURCE (ВНУТРЯНКА)", DISK_SOURCE_PATH), ("TARGET (ВНЕШНЯЯ)", DISK_TARGET_PATH)]:
@@ -234,32 +334,35 @@ def main() -> None:
         backup = find_latest_backup(path, YANDEX_OAUTH_TOKEN)
 
         if not backup:
-            msg = f"Бекап не найден для {path} — пропускаю"
-            print(f"  {msg}")
-            report.append(msg)
+            print(f"  Бекап не найден — пропускаю")
+            ws.cell(row=row, column=1, value=f"{label}: бекап не найден")
+            row += 2
             continue
 
         print(f"  Найден: {backup}")
-        total_all += diff_workbooks(label, backup, path, YANDEX_OAUTH_TOKEN, report)
+        print(f"  Сравниваю...")
+        row, ch = diff_to_report_sheet(ws, label, backup, path, YANDEX_OAUTH_TOKEN, row)
+        total_all += ch
+        print(f"  Изменений: {ch}")
 
-    report.append(f"\n{'=' * 60}")
-    if total_all == 0:
-        report.append("Оба файла идентичны бекапам — изменений нет.")
-    else:
-        report.append(f"Всего изменений: {total_all}")
+    # Итог
+    ws.cell(row=row, column=1, value=f"Всего изменений: {total_all}")
+    ws.cell(row=row, column=1).font = Font(bold=True, size=12)
 
-    report_text = "\n".join(report)
+    # Автоширина первой колонки
+    ws.column_dimensions["A"].width = 18
 
-    # Вывод в консоль
-    print(report_text)
+    # Сохранить и загрузить
+    out = io.BytesIO()
+    wb_report.save(out)
 
-    # Загрузка отчёта на Яндекс Диск
     folder = os.path.dirname(DISK_SOURCE_PATH)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-    report_path = f"{folder}/diff_report_{ts}.txt"
+    ts_file = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    report_path = f"{folder}/diff_report_{ts_file}.xlsx"
 
-    print(f"\nUpload report → {report_path}")
-    disk_upload(report_path, report_text.encode("utf-8"), YANDEX_OAUTH_TOKEN)
+    print(f"Upload report → {report_path}")
+    disk_upload(report_path, out.getvalue(), YANDEX_OAUTH_TOKEN)
+    print(f"Всего изменений: {total_all}")
     print("Done.")
 
 
