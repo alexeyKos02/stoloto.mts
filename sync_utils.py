@@ -202,12 +202,25 @@ FILL_RED = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="soli
 FILL_GRAY = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
 
 
+def clear_col_cf(ws: Worksheet, col_letter: str) -> None:
+    """Удаляет все CF-правила, в диапазоне которых участвует данная колонка."""
+    letter_upper = col_letter.upper()
+    to_remove = [
+        rng for rng in list(ws.conditional_formatting._cf_rules.keys())
+        if letter_upper in rng.upper()
+    ]
+    for rng in to_remove:
+        del ws.conditional_formatting._cf_rules[rng]
+
+
 def apply_bool_cf(ws: Worksheet, col_letter: str, start_row: int, end_row: int) -> None:
-    """CF: пусто→серый, 1→зелёный, 0→красный."""
+    """CF: пусто→серый, 1→зелёный, 0→красный. Сначала чистит старые правила для этой колонки."""
     if end_row < start_row:
         end_row = start_row
     rng = f"{col_letter}{start_row}:{col_letter}{end_row}"
     r0 = start_row
+
+    clear_col_cf(ws, col_letter)
 
     ws.conditional_formatting.add(
         rng,

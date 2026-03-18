@@ -228,9 +228,13 @@ def sync_mts_cert_back(wb_src, wb_tgt) -> None:
         ws_src.cell(row=r, column=src_col_c).value = data[k]
         updated += 1
 
-    # CF
-    letter = col_to_letter(src_col_c)
-    apply_bool_cf(ws_src, letter, start_row=2, end_row=max(src_last, 2))
+    # CF для всех трёх bool-колонок в СВОДНАЯ (иначе при сохранении слетают)
+    bool_cols_src = ["Добавлен сертификат", MTS_CERT_COL, "Билеты продаются"]
+    end = max(src_last, 2)
+    for col_name in bool_cols_src:
+        if col_name not in src_map:
+            continue
+        apply_bool_cf(ws_src, col_to_letter(src_map[col_name]), start_row=2, end_row=end)
 
     print(f"  Reverse (MTS cert) done: updated={updated}, keys_with_value={len(data)}")
 
