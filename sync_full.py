@@ -321,7 +321,8 @@ def step2_svod_to_target_list(wb_src, wb_tgt):
                 copy_row_style(ws_tgt, template_row, rr, max_col)
             for col in COLS_SYNC_TO_TARGET:
                 ws_tgt.cell(row=rr, column=tgt_map[col]).value = payload.get(col, "")
-            # MTS_CERT_COL для новых — оставляем пустым (поле франчайзи)
+            # MTS_CERT_COL для новых — 0 по умолчанию
+            ws_tgt.cell(row=rr, column=tgt_map[MTS_CERT_COL]).value = 0
             ws_tgt.cell(row=rr, column=tgt_map[ENG_COL]).value = None
             inserted += 1
 
