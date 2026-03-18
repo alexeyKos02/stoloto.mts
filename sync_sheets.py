@@ -262,6 +262,19 @@ def main() -> None:
     print("Reverse: Лист1 → СВОДНАЯ (МТС cert)...")
     sync_mts_cert_back(wb_src, wb_tgt)
 
+    # Восстановить CF на листе «терминалы» (openpyxl теряет при save)
+    SHEET_TERMINALS = "терминалы"
+    if SHEET_TERMINALS in wb_tgt.sheetnames:
+        ws_term = wb_tgt[SHEET_TERMINALS]
+        term_map = header_index_map(ws_term)
+        term_key = term_map.get("Агент ID (Столото)", term_map.get("ЮЛ"))
+        term_last = get_last_data_row(ws_term, term_key, start_row=2) if term_key else 2
+        for col_name in ["Добавлен сертификат", "Добавлен сертификат (МТС)"]:
+            if col_name in term_map:
+                apply_bool_cf(ws_term, col_to_letter(term_map[col_name]),
+                              start_row=2, end_row=max(term_last, 2))
+        print(f"  Restored CF on «{SHEET_TERMINALS}»")
+
     # Upload обоих файлов
     out_src = io.BytesIO()
     wb_src.save(out_src)
