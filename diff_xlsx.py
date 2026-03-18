@@ -29,7 +29,7 @@ import requests
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from sync_utils import disk_download, header_index_map, get_last_data_row, is_empty_cell
+from sync_utils import disk_download, disk_upload, header_index_map, get_last_data_row, is_empty_cell
 
 
 # =======================
@@ -178,13 +178,13 @@ def diff_sheet(sheet_name: str, ws_old: Worksheet, ws_new: Worksheet) -> List[st
     return changes
 
 
-def diff_workbooks(label: str, backup_path: str, current_path: str, token: str) -> int:
-    """Сравнивает два файла, возвращает число изменений."""
-    print(f"\n{'=' * 60}")
-    print(f"  {label}")
-    print(f"  Бекап:   {backup_path}")
-    print(f"  Текущий: {current_path}")
-    print(f"{'=' * 60}")
+def diff_workbooks(label: str, backup_path: str, current_path: str, token: str, report: List[str]) -> int:
+    """Сравнивает два файла, пишет результат в report. Возвращает число изменений."""
+    report.append(f"{'=' * 60}")
+    report.append(f"  {label}")
+    report.append(f"  Бекап:   {backup_path}")
+    report.append(f"  Текущий: {current_path}")
+    report.append(f"{'=' * 60}")
 
     old_bytes = disk_download(backup_path, token)
     new_bytes = disk_download(current_path, token)
@@ -197,25 +197,25 @@ def diff_workbooks(label: str, backup_path: str, current_path: str, token: str) 
 
     for sheet_name in all_sheets:
         if sheet_name in wb_old.sheetnames and sheet_name not in wb_new.sheetnames:
-            print(f"\n[{sheet_name}] ЛИСТ УДАЛЁН")
+            report.append(f"\n[{sheet_name}] ЛИСТ УДАЛЁН")
             total += 1
             continue
         if sheet_name not in wb_old.sheetnames and sheet_name in wb_new.sheetnames:
-            print(f"\n[{sheet_name}] ЛИСТ ДОБАВЛЕН")
+            report.append(f"\n[{sheet_name}] ЛИСТ ДОБАВЛЕН")
             total += 1
             continue
 
         changes = diff_sheet(sheet_name, wb_old[sheet_name], wb_new[sheet_name])
         if changes:
-            print(f"\n--- {sheet_name} ({len(changes)} изменений) ---")
+            report.append(f"\n--- {sheet_name} ({len(changes)} изменений) ---")
             for line in changes:
-                print(f"  {line}")
+                report.append(f"  {line}")
             total += len(changes)
 
     if total == 0:
-        print("\n  Изменений нет.")
+        report.append("\n  Изменений нет.")
     else:
-        print(f"\n  Итого: {total} изменений")
+        report.append(f"\n  Итого: {total} изменений")
 
     return total
 
@@ -224,24 +224,43 @@ def diff_workbooks(label: str, backup_path: str, current_path: str, token: str) 
 # ENTRYPOINT
 # =======================
 def main() -> None:
+    from datetime import datetime, timezone
+
+    report: List[str] = []
     total_all = 0
 
     for label, path in [("SOURCE (ВНУТРЯНКА)", DISK_SOURCE_PATH), ("TARGET (ВНЕШНЯЯ)", DISK_TARGET_PATH)]:
-        print(f"\nИщу последний бекап для {label}...")
+        print(f"Ищу последний бекап для {label}...")
         backup = find_latest_backup(path, YANDEX_OAUTH_TOKEN)
 
         if not backup:
-            print(f"  Бекап не найден для {path} — пропускаю")
+            msg = f"Бекап не найден для {path} — пропускаю"
+            print(f"  {msg}")
+            report.append(msg)
             continue
 
         print(f"  Найден: {backup}")
-        total_all += diff_workbooks(label, backup, path, YANDEX_OAUTH_TOKEN)
+        total_all += diff_workbooks(label, backup, path, YANDEX_OAUTH_TOKEN, report)
 
-    print(f"\n{'=' * 60}")
+    report.append(f"\n{'=' * 60}")
     if total_all == 0:
-        print("Оба файла идентичны бекапам — изменений нет.")
+        report.append("Оба файла идентичны бекапам — изменений нет.")
     else:
-        print(f"Всего изменений: {total_all}")
+        report.append(f"Всего изменений: {total_all}")
+
+    report_text = "\n".join(report)
+
+    # Вывод в консоль
+    print(report_text)
+
+    # Загрузка отчёта на Яндекс Диск
+    folder = os.path.dirname(DISK_SOURCE_PATH)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    report_path = f"{folder}/diff_report_{ts}.txt"
+
+    print(f"\nUpload report → {report_path}")
+    disk_upload(report_path, report_text.encode("utf-8"), YANDEX_OAUTH_TOKEN)
+    print("Done.")
 
 
 if __name__ == "__main__":
