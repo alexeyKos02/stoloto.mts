@@ -1,0 +1,30 @@
+name: "Diff XLSX (compare backup vs current)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      disk_file_old:
+        description: "Путь к бекапу на Яндекс Диске"
+        required: true
+      disk_file_new:
+        description: "Путь к текущему файлу на Яндекс Диске"
+        required: true
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install openpyxl requests
+
+      - name: Run diff
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          DISK_FILE_OLD: ${{ github.event.inputs.disk_file_old }}
+          DISK_FILE_NEW: ${{ github.event.inputs.disk_file_new }}
+        run: python diff_xlsx.py
