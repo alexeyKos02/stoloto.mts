@@ -144,6 +144,9 @@ def sync_bools_to_target(wb_src, wb_tgt) -> None:
             for name in COLS_SYNC:
                 val = payload.get(name, None)
                 ws_tgt.cell(row=rr, column=tgt_map[name]).value = val
+            # MTS_CERT_COL для новых — 0 по умолчанию
+            if MTS_CERT_COL in tgt_map:
+                ws_tgt.cell(row=rr, column=tgt_map[MTS_CERT_COL]).value = 0
             inserted += 1
 
     # Нормализация
