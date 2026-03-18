@@ -350,16 +350,21 @@ def main() -> None:
     ws.cell(row=row, column=1).font = Font(bold=True, size=12)
 
     # Автоширина по содержимому
+    from openpyxl.cell.cell import MergedCell
     for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
         max_len = 0
-        col_letter = col_cells[0].column_letter
+        col_letter = None
         for cell in col_cells:
+            if isinstance(cell, MergedCell):
+                continue
+            if col_letter is None:
+                col_letter = cell.column_letter
             if cell.value is not None:
-                # Длина содержимого (unicode-символы шире, но приблизительно ок)
                 length = len(str(cell.value))
                 if length > max_len:
                     max_len = length
-        ws.column_dimensions[col_letter].width = min(max(max_len + 2, 8), 60)
+        if col_letter:
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 8), 60)
 
     # Сохранить и загрузить
     out = io.BytesIO()
