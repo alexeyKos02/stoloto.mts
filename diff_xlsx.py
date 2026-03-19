@@ -63,13 +63,14 @@ THIN_BORDER = Border(
 # =======================
 # FIND LATEST BACKUP
 # =======================
-def find_latest_backup(original_path: str, token: str) -> Optional[str]:
+def _find_latest_by_pattern(original_path: str, token: str, suffix_re: str) -> Optional[str]:
+    """Ищет последний файл, совпадающий с паттерном suffix_re, рядом с original_path."""
     folder = os.path.dirname(original_path)
     basename = os.path.basename(original_path)
     name_no_ext, ext = os.path.splitext(basename)
 
-    backup_pattern = re.compile(
-        re.escape(name_no_ext) + r'_backup_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})' + re.escape(ext)
+    pattern = re.compile(
+        re.escape(name_no_ext) + suffix_re + re.escape(ext)
     )
 
     headers = {"Authorization": f"OAuth {token}"}
@@ -84,18 +85,34 @@ def find_latest_backup(original_path: str, token: str) -> Optional[str]:
 
     items = r.json().get("_embedded", {}).get("items", [])
 
-    backups: List[Tuple[str, str]] = []
+    matches: List[Tuple[str, str]] = []
     for item in items:
         name = item.get("name", "")
-        m = backup_pattern.match(name)
+        m = pattern.match(name)
         if m:
-            backups.append((m.group(1), item.get("path", "")))
+            matches.append((m.group(1), item.get("path", "")))
 
-    if not backups:
+    if not matches:
         return None
 
-    backups.sort(key=lambda x: x[0], reverse=True)
-    return backups[0][1]
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[0][1]
+
+
+def find_latest_backup(original_path: str, token: str) -> Optional[str]:
+    """Ищет последний _backup_ файл (снимок ДО синка)."""
+    return _find_latest_by_pattern(
+        original_path, token,
+        r'_backup_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})',
+    )
+
+
+def find_latest_post_sync(original_path: str, token: str) -> Optional[str]:
+    """Ищет последний _post_sync_ файл (снимок ПОСЛЕ синка)."""
+    return _find_latest_by_pattern(
+        original_path, token,
+        r'_post_sync_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})',
+    )
 
 
 # =======================
@@ -332,6 +349,19 @@ def diff_to_report_sheet(
 # ENTRYPOINT
 # =======================
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode", choices=["post-sync", "pre-sync"], default="post-sync",
+        help=(
+            "post-sync (default) — сравнить бекап (до синка) с текущим файлом (что изменил синк). "
+            "pre-sync — сравнить post_sync снимок (результат последнего синка) с текущим файлом "
+            "(что изменили менеджеры после последнего синка)."
+        ),
+    )
+    args = parser.parse_args()
+    mode = args.mode
+
     wb_report = Workbook()
     ws = wb_report.active
     ws.title = "Diff Report"
@@ -339,25 +369,32 @@ def main() -> None:
     # Заголовок
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     ws.merge_cells("A1:J1")
-    title = ws.cell(row=1, column=1, value=f"Отчёт сравнения — {ts}")
+    if mode == "pre-sync":
+        report_title = f"Изменения менеджеров с последнего синка — {ts}"
+    else:
+        report_title = f"Отчёт сравнения (до/после синка) — {ts}"
+    title = ws.cell(row=1, column=1, value=report_title)
     title.font = Font(bold=True, size=16)
     row = 3
 
     total_all = 0
 
-    for label, path in [("SOURCE (ВНУТРЯНКА)", DISK_SOURCE_PATH), ("TARGET (ВНЕШНЯЯ)", DISK_TARGET_PATH)]:
-        print(f"Ищу последний бекап для {label}...")
-        backup = find_latest_backup(path, YANDEX_OAUTH_TOKEN)
+    find_fn = find_latest_post_sync if mode == "pre-sync" else find_latest_backup
+    kind_label = "post_sync снимок" if mode == "pre-sync" else "бекап"
 
-        if not backup:
-            print(f"  Бекап не найден — пропускаю")
-            ws.cell(row=row, column=1, value=f"{label}: бекап не найден")
+    for label, path in [("SOURCE (ВНУТРЯНКА)", DISK_SOURCE_PATH), ("TARGET (ВНЕШНЯЯ)", DISK_TARGET_PATH)]:
+        print(f"Ищу последний {kind_label} для {label}...")
+        ref_path = find_fn(path, YANDEX_OAUTH_TOKEN)
+
+        if not ref_path:
+            print(f"  {kind_label} не найден — пропускаю")
+            ws.cell(row=row, column=1, value=f"{label}: {kind_label} не найден")
             row += 2
             continue
 
-        print(f"  Найден: {backup}")
+        print(f"  Найден: {ref_path}")
         print(f"  Сравниваю...")
-        row, ch = diff_to_report_sheet(ws, label, backup, path, YANDEX_OAUTH_TOKEN, row)
+        row, ch = diff_to_report_sheet(ws, label, ref_path, path, YANDEX_OAUTH_TOKEN, row)
         total_all += ch
         print(f"  Изменений: {ch}")
 
@@ -387,7 +424,8 @@ def main() -> None:
 
     folder = os.path.dirname(DISK_SOURCE_PATH)
     ts_file = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-    report_path = f"{folder}/diff_report_{ts_file}.xlsx"
+    prefix = "managers_diff" if mode == "pre-sync" else "diff_report"
+    report_path = f"{folder}/{prefix}_{ts_file}.xlsx"
 
     print(f"Upload report → {report_path}")
     disk_upload(report_path, out.getvalue(), YANDEX_OAUTH_TOKEN)

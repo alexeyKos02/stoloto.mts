@@ -711,11 +711,28 @@ def main() -> None:
     step4_bd_to_terminals(wb_src, wb_tgt)
 
     # Upload обоих файлов
+    src_result = wb_to_bytes(wb_src)
+    tgt_result = wb_to_bytes(wb_tgt)
+
     print(f"Upload SOURCE: {DISK_SOURCE_PATH}")
-    disk_upload(DISK_SOURCE_PATH, wb_to_bytes(wb_src), YANDEX_OAUTH_TOKEN)
+    disk_upload(DISK_SOURCE_PATH, src_result, YANDEX_OAUTH_TOKEN)
 
     print(f"Upload TARGET: {DISK_TARGET_PATH}")
-    disk_upload(DISK_TARGET_PATH, wb_to_bytes(wb_tgt), YANDEX_OAUTH_TOKEN)
+    disk_upload(DISK_TARGET_PATH, tgt_result, YANDEX_OAUTH_TOKEN)
+
+    # Post-sync бекапы (снимок ПОСЛЕ синка, для сравнения что менеджеры поменяли)
+    def post_sync_path(original: str) -> str:
+        base, ext = os.path.splitext(original)
+        return f"{base}_post_sync_{ts}{ext}"
+
+    ps_src = post_sync_path(DISK_SOURCE_PATH)
+    ps_tgt = post_sync_path(DISK_TARGET_PATH)
+
+    print(f"Post-sync backup SOURCE → {ps_src}")
+    disk_upload(ps_src, src_result, YANDEX_OAUTH_TOKEN)
+
+    print(f"Post-sync backup TARGET → {ps_tgt}")
+    disk_upload(ps_tgt, tgt_result, YANDEX_OAUTH_TOKEN)
 
     print("Done: full sync")
 
