@@ -1,7 +1,16 @@
-name: "Diff XLSX (backup vs current)"
+name: "Diff XLSX"
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Режим сравнения"
+        required: true
+        type: choice
+        default: "post-sync"
+        options:
+          - post-sync
+          - pre-sync
 
 jobs:
   diff:
@@ -20,4 +29,4 @@ jobs:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
           DISK_SOURCE_PATH: ${{ secrets.DISK_SOURCE_PATH }}
           DISK_TARGET_PATH: ${{ secrets.DISK_TARGET_PATH }}
-        run: python diff_xlsx.py
+        run: python diff_xlsx.py --mode ${{ inputs.mode }}
