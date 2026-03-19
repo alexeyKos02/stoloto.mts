@@ -42,16 +42,33 @@ def disk_download(path: str, token: str) -> bytes:
 
 def disk_upload(path: str, content: bytes, token: str, retries: int = 8) -> None:
     headers = {"Authorization": f"OAuth {token}"}
-    r = requests.get(
-        f"{YANDEX_API}/resources/upload",
-        headers=headers,
-        params={"path": path, "overwrite": "true"},
-        timeout=60,
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(f"UPLOAD(HREF) ERROR: {r.status_code}\nPATH: {path}\nBODY: {r.text}")
-    href = r.json()["href"]
 
+    # Получение href с retry на 423
+    href = None
+    for attempt in range(1, retries + 1):
+        r = requests.get(
+            f"{YANDEX_API}/resources/upload",
+            headers=headers,
+            params={"path": path, "overwrite": "true"},
+            timeout=60,
+        )
+        if r.status_code < 400:
+            href = r.json()["href"]
+            break
+        if r.status_code == 423:
+            wait = min(2 ** attempt, 30)
+            print(f"  Upload HREF LOCKED (423). Retry {attempt}/{retries} in {wait}s...")
+            time.sleep(wait)
+            continue
+        raise RuntimeError(f"UPLOAD(HREF) ERROR: {r.status_code}\nPATH: {path}\nBODY: {r.text}")
+
+    if href is None:
+        raise RuntimeError(
+            "UPLOAD ERROR: resource is LOCKED too long (423 on href). "
+            "Закрой файл в Яндекс Таблицах/редакторе и запусти workflow ещё раз."
+        )
+
+    # Загрузка файла с retry на 423
     for attempt in range(1, retries + 1):
         put = requests.put(href, data=content, timeout=240)
         if put.status_code < 400:
@@ -59,7 +76,7 @@ def disk_upload(path: str, content: bytes, token: str, retries: int = 8) -> None
 
         if put.status_code == 423:
             wait = min(2 ** attempt, 30)
-            print(f"  Upload LOCKED (423). Retry {attempt}/{retries} in {wait}s...")
+            print(f"  Upload PUT LOCKED (423). Retry {attempt}/{retries} in {wait}s...")
             time.sleep(wait)
             continue
 
