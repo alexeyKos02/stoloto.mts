@@ -113,8 +113,8 @@ def read_sheet_data(ws: Worksheet) -> Tuple[List[str], List[Dict[str, str]]]:
         return [], []
 
     headers = list(hmap.keys())
-    first_col = next(iter(hmap.values()))
-    last = get_last_data_row(ws, first_col, start_row=2)
+    # Последняя строка по ВСЕМ колонкам (не только первой)
+    last = max(get_last_data_row(ws, col_idx, start_row=2) for col_idx in hmap.values())
 
     rows: List[Dict[str, str]] = []
     for r in range(2, last + 1):
