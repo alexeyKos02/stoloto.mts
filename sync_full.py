@@ -718,25 +718,21 @@ def main() -> None:
     src_result = wb_to_bytes(wb_src)
     tgt_result = wb_to_bytes(wb_tgt)
 
-    print(f"Upload SOURCE: {DISK_SOURCE_PATH}")
-    disk_upload(DISK_SOURCE_PATH, src_result, YANDEX_OAUTH_TOKEN)
-
-    print(f"Upload TARGET: {DISK_TARGET_PATH}")
-    disk_upload(DISK_TARGET_PATH, tgt_result, YANDEX_OAUTH_TOKEN)
-
-    # Post-sync бекапы (снимок ПОСЛЕ синка, для сравнения что менеджеры поменяли)
+    # Post-sync paths
     def post_sync_path(original: str) -> str:
         base, ext = os.path.splitext(original)
         return f"{base}_post_sync_{ts}{ext}"
 
-    ps_src = post_sync_path(DISK_SOURCE_PATH)
-    ps_tgt = post_sync_path(DISK_TARGET_PATH)
-
-    print(f"Post-sync backup SOURCE → {ps_src}")
-    disk_upload(ps_src, src_result, YANDEX_OAUTH_TOKEN)
-
-    print(f"Post-sync backup TARGET → {ps_tgt}")
-    disk_upload(ps_tgt, tgt_result, YANDEX_OAUTH_TOKEN)
+    # Upload файлов последовательно (retry на 423 внутри disk_upload)
+    uploads = [
+        (f"Upload SOURCE: {DISK_SOURCE_PATH}", DISK_SOURCE_PATH, src_result),
+        (f"Upload TARGET: {DISK_TARGET_PATH}", DISK_TARGET_PATH, tgt_result),
+        (f"Post-sync backup SOURCE → {post_sync_path(DISK_SOURCE_PATH)}", post_sync_path(DISK_SOURCE_PATH), src_result),
+        (f"Post-sync backup TARGET → {post_sync_path(DISK_TARGET_PATH)}", post_sync_path(DISK_TARGET_PATH), tgt_result),
+    ]
+    for msg, path, data in uploads:
+        print(msg)
+        disk_upload(path, data, YANDEX_OAUTH_TOKEN)
 
     print("Done: full sync")
 
