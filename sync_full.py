@@ -502,6 +502,18 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
     bd_has_comments = BD_CERT_COMMENT_COL in bd_map
 
     ensure_columns_at_end(ws_tgt, TERMINALS_BASE_COLS)
+
+    # Удаляем лишние колонки "Комментарии" (без квалификатора) — они не используются
+    cols_to_delete = []
+    for c in range(1, ws_tgt.max_column + 1):
+        v = ws_tgt.cell(row=1, column=c).value
+        if v is not None and str(v).strip() == "Комментарии":
+            cols_to_delete.append(c)
+    for c in reversed(cols_to_delete):
+        ws_tgt.delete_cols(c, 1)
+    if cols_to_delete:
+        print(f"  Removed {len(cols_to_delete)} stale 'Комментарии' column(s) from терминалы")
+
     tgt_map = header_index_map(ws_tgt)
 
     bd_last = get_last_data_row(ws_bd, bd_map[COL_AGENT], start_row=2)
