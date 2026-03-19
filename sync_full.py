@@ -26,7 +26,7 @@ from sync_utils import (
     col_to_letter, copy_row_style, copy_cell_style, ensure_columns_at_end,
     normalize_bool_to_01, apply_bool_cf,
     parse_terminal_id, compress_ranges, format_ranges,
-    cert_from_status, COL_STATUS, STATUS_VALUES,
+    cert_from_status, COL_STATUS, STATUS_VALUES, STATUS_DEFAULT,
     normalize_mts_id, ru_to_translit,
 )
 
@@ -520,6 +520,13 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
     dv.promptTitle = "Статус"
     ws_bd.add_data_validation(dv)
     dv.add(f"{status_letter}2:{status_letter}{max(bd_last_for_dv, 2) + 500}")
+
+    # Заполняем пустые ячейки Статус значением по умолчанию
+    status_col = bd_map[COL_STATUS]
+    for r in range(2, bd_last_for_dv + 1):
+        v = ws_bd.cell(row=r, column=status_col).value
+        if v is None or str(v).strip() == "":
+            ws_bd.cell(row=r, column=status_col).value = STATUS_DEFAULT
 
     ensure_columns_at_end(ws_tgt, TERMINALS_BASE_COLS)
 

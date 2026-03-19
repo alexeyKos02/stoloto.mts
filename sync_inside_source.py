@@ -23,7 +23,7 @@ from sync_utils import (
     col_to_letter, copy_row_style, ensure_columns_at_end,
     normalize_bool_to_01, apply_bool_cf,
     parse_terminal_id, compress_ranges, format_ranges,
-    COL_STATUS, STATUS_VALUES,
+    COL_STATUS, STATUS_VALUES, STATUS_DEFAULT,
 )
 
 
@@ -122,6 +122,13 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
     _dv.promptTitle = "Статус"
     ws_bd.add_data_validation(_dv)
     _dv.add(f"{_status_letter}2:{_status_letter}{max(_bd_last_tmp, 2) + 500}")
+
+    # Заполняем пустые ячейки Статус значением по умолчанию
+    _status_col = _bd_map_tmp[COL_STATUS]
+    for r in range(2, _bd_last_tmp + 1):
+        v = ws_bd.cell(row=r, column=_status_col).value
+        if v is None or str(v).strip() == "":
+            ws_bd.cell(row=r, column=_status_col).value = STATUS_DEFAULT
 
     print(f'Ensure columns in "{SHEET_SVOD}"...')
     ensure_columns_at_end(ws_svod, SVOD_BOOL_COLS)
