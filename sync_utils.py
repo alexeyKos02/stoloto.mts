@@ -280,14 +280,18 @@ def format_ranges(ranges: List[Tuple[int, int]]) -> str:
 # =======================
 # CERT FROM BD COMMENT
 # =======================
+CERT_OK_PHRASE = "есть все, но со стороны мтс нет сертификата"
+
+
 def cert_value_from_bd_comment(comment_value) -> int:
     """
     Логика вычисления "Добавлен сертификат" по комментарию из БД:
-    - пустой комментарий → 1 (всё ок, сертификат добавлен)
-    - любой непустой комментарий → 0 (есть проблема)
+    - пустой комментарий → 1
+    - "есть все, но со стороны мтс нет сертификата" → 1
+    - всё остальное → 0
     """
-    s = "" if comment_value is None else str(comment_value).strip()
-    if s == "":
+    s = "" if comment_value is None else str(comment_value).strip().lower()
+    if s == "" or s == CERT_OK_PHRASE:
         return 1
     return 0
 
