@@ -222,13 +222,14 @@ def step1_bd_to_svod(wb_src):
             ws_svod.cell(row=rr, column=sv_map["Билеты продаются"]).value = 0
             inserted += 1
 
-    # нормализация 0/1
+    # нормализация 0/1 (пустые → 0)
     last_data_row = get_last_data_row(ws_svod, ul_col_sv, start_row=2)
     for col_name in SVOD_BOOL_COLS:
         c = sv_map[col_name]
         for r in range(2, last_data_row + 1):
             v = ws_svod.cell(row=r, column=c).value
             if is_empty_cell(v):
+                ws_svod.cell(row=r, column=c).value = 0
                 continue
             norm = normalize_bool_to_01(v)
             if norm is not None:
