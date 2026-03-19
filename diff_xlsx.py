@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -202,7 +203,7 @@ def write_diff_sheet(
                 continue  # строка не изменилась
 
             if prev_type is not None:
-                row += 1
+                row += 1  # пустая строка между блоками разного типа или между modified
             prev_type = "modified"
 
             changes += len(changed_cols)
@@ -365,7 +366,6 @@ def main() -> None:
     ws.cell(row=row, column=1).font = Font(bold=True, size=12)
 
     # Автоширина по содержимому
-    from openpyxl.cell.cell import MergedCell
     for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
         max_len = 0
         col_letter = None

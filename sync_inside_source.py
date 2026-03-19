@@ -15,12 +15,15 @@ from typing import Dict, List, Set
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from openpyxl.worksheet.datavalidation import DataValidation
+
 from sync_utils import (
     disk_download, disk_upload,
     header_index_map, get_cell_str, is_empty_cell, get_last_data_row,
     col_to_letter, copy_row_style, ensure_columns_at_end,
     normalize_bool_to_01, apply_bool_cf,
     parse_terminal_id, compress_ranges, format_ranges,
+    COL_STATUS, STATUS_VALUES,
 )
 
 
@@ -102,6 +105,23 @@ def sync_inside_workbook(src_bytes: bytes) -> bytes:
 
     ws_bd = wb[SHEET_BD]
     ws_svod = wb[SHEET_SVOD]
+
+    # Добавляем колонку "Статус" в БД, если её нет, + data validation
+    ensure_columns_at_end(ws_bd, [COL_STATUS])
+    _bd_map_tmp = header_index_map(ws_bd)
+    _status_letter = col_to_letter(_bd_map_tmp[COL_STATUS])
+    _bd_last_tmp = get_last_data_row(ws_bd, _bd_map_tmp.get("ЮЛ", 1), start_row=2)
+    _dv = DataValidation(
+        type="list",
+        formula1='"' + ",".join(STATUS_VALUES) + '"',
+        allow_blank=True,
+    )
+    _dv.error = "Выберите значение из списка"
+    _dv.errorTitle = "Ошибка"
+    _dv.prompt = "Выберите статус"
+    _dv.promptTitle = "Статус"
+    ws_bd.add_data_validation(_dv)
+    _dv.add(f"{_status_letter}2:{_status_letter}{max(_bd_last_tmp, 2) + 500}")
 
     print(f'Ensure columns in "{SHEET_SVOD}"...')
     ensure_columns_at_end(ws_svod, SVOD_BOOL_COLS)
