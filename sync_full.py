@@ -18,13 +18,16 @@ from typing import Dict, List, Optional, Set
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from openpyxl.worksheet.datavalidation import DataValidation
+
 from sync_utils import (
     disk_download, disk_upload,
     header_index_map, last_header_col, get_cell_str, is_empty_cell, get_last_data_row,
     col_to_letter, copy_row_style, copy_cell_style, ensure_columns_at_end,
     normalize_bool_to_01, apply_bool_cf,
     parse_terminal_id, compress_ranges, format_ranges,
-    cert_value_from_bd_comment, normalize_mts_id, ru_to_translit,
+    cert_from_status, COL_STATUS, STATUS_VALUES,
+    normalize_mts_id, ru_to_translit,
 )
 
 
@@ -500,7 +503,23 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
         raise RuntimeError(f'BD missing required column: "{COL_TERMINAL}"')
 
     bd_mts_name = pick_bd_mts_col(bd_map)
-    bd_has_comments = BD_CERT_COMMENT_COL in bd_map
+
+    # Добавляем колонку "Статус" в БД, если её нет, + data validation (выпадающий список)
+    ensure_columns_at_end(ws_bd, [COL_STATUS])
+    bd_map = header_index_map(ws_bd)  # обновляем после добавления колонки
+    status_letter = col_to_letter(bd_map[COL_STATUS])
+    bd_last_for_dv = get_last_data_row(ws_bd, bd_map[COL_AGENT], start_row=2)
+    dv = DataValidation(
+        type="list",
+        formula1='"' + ",".join(STATUS_VALUES) + '"',
+        allow_blank=True,
+    )
+    dv.error = "Выберите значение из списка"
+    dv.errorTitle = "Ошибка"
+    dv.prompt = "Выберите статус"
+    dv.promptTitle = "Статус"
+    ws_bd.add_data_validation(dv)
+    dv.add(f"{status_letter}2:{status_letter}{max(bd_last_for_dv, 2) + 500}")
 
     ensure_columns_at_end(ws_tgt, TERMINALS_BASE_COLS)
 
@@ -567,8 +586,8 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
         if not agent or not terminal:
             continue
 
-        bd_comment_val = ws_bd.cell(row=r, column=bd_map[BD_CERT_COMMENT_COL]).value if bd_has_comments else None
-        cert_val = cert_value_from_bd_comment(bd_comment_val)
+        status_val = ws_bd.cell(row=r, column=bd_map[COL_STATUS]).value
+        cert_val = cert_from_status(status_val)
 
         def bd_val(col_name: str) -> str:
             if col_name == COL_MTS:

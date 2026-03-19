@@ -278,7 +278,35 @@ def format_ranges(ranges: List[Tuple[int, int]]) -> str:
 
 
 # =======================
-# CERT FROM BD COMMENT
+# STATUS (Статус) — колонка в БД
+# =======================
+COL_STATUS = "Статус"
+STATUS_ADDED = "добавлен"
+STATUS_VALUES = [
+    "ожидает GUID",
+    "без игр",
+    "заблокирован",
+    "добавлен без сертификата",
+    "добавлен",
+]
+
+
+def cert_from_status(status_value) -> int:
+    """
+    Определяет «Добавлен сертификат» по значению колонки Статус:
+    - "добавлен" → 1
+    - всё остальное (включая пустое) → 0
+    """
+    if status_value is None:
+        return 0
+    s = str(status_value).strip().lower()
+    if s == STATUS_ADDED:
+        return 1
+    return 0
+
+
+# =======================
+# CERT FROM BD COMMENT (legacy — kept for reference)
 # =======================
 CERT_OK_PHRASE = "есть все, но со стороны мтс нет сертификата"
 
