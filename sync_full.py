@@ -651,6 +651,10 @@ def step4_bd_to_terminals(wb_src, wb_tgt):
             letter = col_to_letter(tgt_map[col_name])
             apply_bool_cf(ws_tgt, letter, start_row=2, end_row=end_row)
 
+    # Удаляем row_dimensions для пустых строк после данных (фикс рендеринга Яндекс Диска)
+    for r in [r for r in ws_tgt.row_dimensions if r > end_row + 1]:
+        del ws_tgt.row_dimensions[r]
+
     print(f"  Step 4 done: updated={updated}, inserted={inserted}, deleted={deleted}, bd_rows={max(bd_last - 1, 0)}")
 
 
